@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "server": "tsx server/index.ts"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
@@ -48,7 +49,6 @@
     "date-fns": "3.6.0",
     "dotenv": "^17.4.2",
     "embla-carousel-react": "8.6.0",
-    "expree": "^2.1.0",
     "express": "^4.22.2",
     "input-otp": "1.4.2",
     "leaflet": "^1.9.4",
