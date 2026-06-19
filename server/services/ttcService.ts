@@ -33,6 +33,7 @@ export interface Prediction {
   routeId: number;
   direction: string;
   etaMin: number;
+  confidence: number;
   dirs: [string, string];
   routes: number[];
   offsets: {
@@ -50,6 +51,7 @@ export interface BusReport {
   stopName: string;
   routeId: number;
   etaMin: number;
+  confidence: number;
   factors: {
     schedule: { value: number; description: string };
     weather: { value: number; description: string };
@@ -189,6 +191,25 @@ const toNumberRoutes = (routes: Iterable<string | number>) =>
     .map((route) => Number(route))
     .filter((route) => Number.isFinite(route))
     .sort((a, b) => a - b);
+
+const getPredictionConfidence = (offsets: {
+  schedule: number;
+  weather: number;
+  traffic: number;
+  accidents: number;
+  construction: number;
+  other: number;
+}) => {
+  const variableDelay =
+    Math.abs(offsets.schedule) +
+    Math.abs(offsets.weather) +
+    Math.abs(offsets.traffic) +
+    Math.abs(offsets.accidents) +
+    Math.abs(offsets.construction) +
+    Math.abs(offsets.other);
+
+  return Math.max(62, Math.min(94, 94 - variableDelay * 4));
+};
 
 const GROUP_PREFIX = "group:";
 
@@ -661,22 +682,25 @@ export const getPrediction = (
       );
     }
 
+    const offsets = {
+      schedule: 0,
+      weather: 0,
+      traffic: 0,
+      accidents: 0,
+      construction: 0,
+      other: 0,
+    };
+
     return {
       source: "gtfs",
       stopName: gtfsGroup.name,
       routeId,
       direction: prediction.headsign,
       etaMin: prediction.etaMin,
+      confidence: getPredictionConfidence(offsets),
       dirs: getGtfsStopDirs(db, stopId, routeId),
       routes,
-      offsets: {
-        schedule: 0,
-        weather: 0,
-        traffic: 0,
-        accidents: 0,
-        construction: 0,
-        other: 0,
-      },
+      offsets,
     };
   }
 
@@ -690,22 +714,25 @@ export const getPrediction = (
     );
   }
 
+  const offsets = {
+    schedule: prediction.schedule,
+    weather: prediction.weather,
+    traffic: prediction.traffic,
+    accidents: 0,
+    construction: 0,
+    other: 0,
+  };
+
   return {
     source: "mock",
     stopName: stop.name,
     routeId,
     direction,
     etaMin: prediction.eta,
+    confidence: getPredictionConfidence(offsets),
     dirs: stop.dirs,
     routes: stop.routes,
-    offsets: {
-      schedule: prediction.schedule,
-      weather: prediction.weather,
-      traffic: prediction.traffic,
-      accidents: 0,
-      construction: 0,
-      other: 0,
-    },
+    offsets,
   };
 };
 
@@ -725,6 +752,7 @@ export const getBusReport = (
       stopName: prediction.stopName,
       routeId,
       etaMin: prediction.etaMin,
+      confidence: prediction.confidence,
       factors: {
         schedule: {
           value: 0,
@@ -762,11 +790,21 @@ export const getBusReport = (
     throw new Error(`No data for stop=${stopId} route=${routeId} dir=${direction}`);
   }
 
+  const offsets = {
+    schedule: prediction.schedule,
+    weather: prediction.weather,
+    traffic: prediction.traffic,
+    accidents: 0,
+    construction: 0,
+    other: 0,
+  };
+
   return {
     source: "mock",
     stopName: stop.name,
     routeId,
     etaMin: prediction.eta,
+    confidence: getPredictionConfidence(offsets),
     factors: {
       schedule: {
         value: prediction.schedule,

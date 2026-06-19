@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import L from "leaflet";
 import imgBike from "@/imports/DestinationNavigation/cb0afd1c8831cacec947b71a1ac0f19474ebe314.png";
+import imgMilk from "@/imports/Map501WestboundSelected-2/e8d0b21b247328a8e92836e60bd74ba4fda1cb94.png";
 
 const TORONTO: [number, number] = [43.6532, -79.3832];
 
@@ -103,9 +104,9 @@ function fmt(v: number) {
 
 import {
   getStopMeta, searchStops, searchDestinations, getNearbyStops,
-  getPrediction, getBusReport as apiBusReport, getNavigationRoute,
+  getPrediction, getBusReport as apiBusReport, getNavigationRoute, askTransitAssistant,
   type Prediction, type BusReport as BusReportData, type NavigationRoute,
-  type NearbyStop,
+  type NearbyStop, type TransitAssistantContext,
 } from "@/api/ttc";
 import {
   getCurrentWeather,
@@ -152,6 +153,13 @@ function describeTrafficDelay(impact: TrafficImpact, key: "traffic" | "accident"
   if (key === "traffic") return "Traffic is normal, no additional delay expected.";
   if (key === "accident") return "No traffic incidents are reported near this route.";
   return "No construction activity is reported near this route.";
+}
+
+function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
+  const variableDelay = Object.values(factors)
+    .reduce((total, factor) => total + Math.abs(factor.value), 0);
+
+  return Math.max(62, Math.min(94, 94 - variableDelay * 4));
 }
 
 // ─── Shared loading skeleton ──────────────────────────────────────────────────
@@ -595,6 +603,7 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
           };
         }
 
+        nextReport.confidence = estimateConfidenceFromFactors(nextReport.factors);
         setData(nextReport);
         setLoading(false);
       })
@@ -632,6 +641,9 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
                   <span className="font-['Rowdies',sans-serif] text-[38px] text-[#4f4f4f] leading-none">{data.etaMin}</span>
                   <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">min.</span>
                 </div>
+                <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#656565]">
+                  Confidence {data.confidence ?? 82}%
+                </span>
               </>
             )}
           </div>
@@ -875,6 +887,169 @@ function NavScreen({ destId, mapCenter, userPos, onClose }: NavScreenProps) {
   );
 }
 
+// ─── AI Chatbot overlay ───────────────────────────────────────────────────────
+
+interface ChatMessage {
+  role: "user" | "ai";
+  text: string;
+}
+
+function MilkIcon({ size = 30 }: { size?: number }) {
+  return (
+    <div className="relative overflow-hidden shrink-0" style={{ width: size, height: size }}>
+      <img
+        src={imgMilk}
+        alt="Milk bot"
+        className="absolute max-w-none pointer-events-none"
+        style={{
+          width: "120.83%",
+          height: "130.13%",
+          left: "-10.74%",
+          top: "-11.7%",
+        }}
+      />
+    </div>
+  );
+}
+
+function AiChatbot() {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
+  const [assistantContext, setAssistantContext] = useState<TransitAssistantContext>({});
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isTyping]);
+
+  async function sendMessage() {
+    const text = input.trim();
+    if (!text) return;
+
+    setMessages(prev => [...prev, { role: "user", text }]);
+    setInput("");
+    setIsTyping(true);
+
+    try {
+      const answer = await askTransitAssistant(text, assistantContext);
+      if (answer.context) setAssistantContext(answer.context);
+      setMessages(prev => [...prev, { role: "ai", text: answer.text }]);
+    } catch {
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: "I could not calculate that trip answer right now. Try asking about a route number, stop, delay, or destination.",
+      }]);
+    } finally {
+      setIsTyping(false);
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  return (
+    <>
+      {open ? (
+        <>
+          <div
+            className="fixed inset-0 z-[2000] pointer-events-auto"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            className="fixed left-1/2 top-1/2 z-[2001] w-[min(100vw,390px)] h-[82vh] -translate-x-1/2 -translate-y-1/2 bg-white border-2 border-[#9d9d9d] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] flex flex-col overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 shrink-0 border-b border-[#e5e5e5]">
+              <span className="font-['Inter',system-ui,sans-serif] font-bold text-[16px] text-black leading-[1.4]">
+                Chat with Milk bot
+              </span>
+              <button
+                onClick={() => setOpen(false)}
+                className="size-6 flex items-center justify-center cursor-pointer opacity-70 hover:opacity-100"
+                aria-label="Minimize"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
+              {messages.map((message, index) => (
+                <div key={index} className={`flex gap-2 ${message.role === "user" ? "justify-end" : "justify-start items-start"}`}>
+                  {message.role === "ai" && <MilkIcon size={30} />}
+                  <div
+                    className={`max-w-[75%] rounded-[8px] px-3 py-[6px] font-['Inter',system-ui,sans-serif] text-[15px] leading-[1.4] ${
+                      message.role === "user"
+                        ? "bg-[#f5f5f5] border border-[#d9d9d9] text-[#1e1e1e]"
+                        : "text-[#1e1e1e]"
+                    }`}
+                  >
+                    {message.text}
+                  </div>
+                </div>
+              ))}
+              {isTyping && (
+                <div className="flex gap-2 items-center">
+                  <MilkIcon size={30} />
+                  <div className="bg-[#f5f5f5] border border-[#d9d9d9] rounded-[8px] px-3 py-2 font-['Inter',system-ui,sans-serif] text-[14px] text-[#656565]">
+                    Thinking...
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="shrink-0 px-4 pb-4">
+              <div className="bg-white border border-[#d9d9d9] rounded-[16px] p-4 flex flex-col gap-4">
+                <textarea
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask me anything about commuting!"
+                  rows={1}
+                  className="w-full font-['Inter',system-ui,sans-serif] text-[16px] text-[#1e1e1e] placeholder:text-[#b3b3b3] leading-[1.4] resize-none outline-none bg-transparent"
+                  style={{ minHeight: "22px", maxHeight: "88px" }}
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={sendMessage}
+                    disabled={!input.trim()}
+                    className="size-9 rounded-full flex items-center justify-center transition-colors cursor-pointer disabled:cursor-default"
+                    style={{ background: input.trim() ? "#1e1e1e" : "#d9d9d9" }}
+                    aria-label="Send"
+                  >
+                    <svg className="size-4" fill="none" viewBox="0 0 14 14">
+                      <path d="M7 12V2M7 2L2 7M7 2L12 7" stroke={input.trim() ? "white" : "#b3b3b3"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <button
+          onClick={() => setOpen(true)}
+          className="fixed right-5 bottom-[100px] z-[2000] bg-white rounded-[32px] flex items-center justify-center cursor-pointer"
+          style={{
+            width: 50,
+            height: 50,
+            boxShadow: "0px 4px 4px rgba(0,0,0,0.15), 0px 1px 1.5px rgba(0,0,0,0.3)",
+          }}
+          aria-label="Open Milk bot"
+        >
+          <MilkIcon size={30} />
+        </button>
+      )}
+    </>
+  );
+}
+
 // ─── App root ─────────────────────────────────────────────────────────────────
 
 type AppScreen =
@@ -950,6 +1125,8 @@ export default function App() {
   };
 
   return (
+    <>
+    <AiChatbot />
     <div className="min-h-screen bg-gray-100 flex items-start justify-center">
       <div className="w-full max-w-[390px] min-h-screen bg-white relative overflow-x-hidden">
         {searching ? (
@@ -999,5 +1176,6 @@ export default function App() {
         ) : null}
       </div>
     </div>
+    </>
   );
 }
