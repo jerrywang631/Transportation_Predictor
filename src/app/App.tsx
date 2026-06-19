@@ -108,6 +108,59 @@ import {
   type Prediction, type BusReport as BusReportData, type NavigationRoute,
   type NearbyStop, type TransitAssistantContext,
 } from "@/api/ttc";
+import {
+  getCurrentWeather,
+  type CurrentWeather,
+} from "@/api/weather";
+import {
+  getTrafficImpact,
+  type TrafficImpact,
+} from "@/api/traffic";
+
+function estimateWeatherDelay(weather: CurrentWeather): number {
+  const condition = weather.condition.toLowerCase();
+  let delay = 0;
+
+  if (condition.includes("rain") || condition.includes("drizzle")) delay += 2;
+  if (condition.includes("snow") || condition.includes("sleet") || condition.includes("ice")) delay += 3;
+  if (condition.includes("thunder") || condition.includes("storm")) delay += 4;
+  if (condition.includes("fog") || condition.includes("mist") || condition.includes("overcast")) delay += 1;
+  if ((weather.precipitationMm ?? 0) >= 2) delay += 2;
+  else if ((weather.precipitationMm ?? 0) > 0) delay += 1;
+  if (weather.windKph >= 45) delay += 2;
+  else if (weather.windKph >= 30) delay += 1;
+
+  return Math.min(delay, 6);
+}
+
+function describeWeatherDelay(weather: CurrentWeather, delay: number): string {
+  const source = weather.source === "weatherapi" ? "WeatherAPI" : "mock weather data";
+
+  if (delay === 0) {
+    return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. No weather delay is expected.`;
+  }
+
+  return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. Current conditions may add about ${delay} min to this trip.`;
+}
+
+function describeTrafficDelay(impact: TrafficImpact, key: "traffic" | "accident" | "construction") {
+  const event = impact.events.find(item => item.type === key || (key === "accident" && item.type === "accident"));
+
+  if (event) {
+    return `${event.title}. ${event.description}`;
+  }
+
+  if (key === "traffic") return "Traffic is normal, no additional delay expected.";
+  if (key === "accident") return "No traffic incidents are reported near this route.";
+  return "No construction activity is reported near this route.";
+}
+
+function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
+  const variableDelay = Object.values(factors)
+    .reduce((total, factor) => total + Math.abs(factor.value), 0);
+
+  return Math.max(62, Math.min(94, 94 - variableDelay * 4));
+}
 
 // ─── Shared loading skeleton ──────────────────────────────────────────────────
 
@@ -188,6 +241,18 @@ function OffsetItem({ icon, value, label }: OffsetItemProps) {
       </div>
     </div>
   );
+}
+
+function directionTextClass(label: string) {
+  if (label.length > 44) {
+    return "text-[10px] leading-[12px]";
+  }
+
+  if (label.length > 30) {
+    return "text-[11px] leading-[13px]";
+  }
+
+  return "text-[13px] leading-[15px]";
 }
 
 // ─── Screen components ────────────────────────────────────────────────────────
@@ -292,6 +357,7 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
   const [selectedRoute, setSelectedRoute] = useState<number | null>(null);
   const [dir, setDir] = useState<string | null>(null);
   const [nearbyStops, setNearbyStops] = useState<NearbyStop[]>([]);
+  const [weather, setWeather] = useState<CurrentWeather | null>(null);
 
   // Bootstrap: load stop metadata, pick defaults, then fetch first prediction
   useEffect(() => {
@@ -330,8 +396,32 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
     getNearbyStops(mapCenter[0], mapCenter[1]).then(setNearbyStops);
   }, [mapCenter[0], mapCenter[1]]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    getCurrentWeather(mapCenter[0], mapCenter[1])
+      .then(currentWeather => {
+        if (!cancelled) setWeather(currentWeather);
+      })
+      .catch(() => {
+        if (!cancelled) setWeather(null);
+      });
+
+    return () => { cancelled = true; };
+  }, [mapCenter[0], mapCenter[1]]);
+
   const routes = prediction?.routes ?? [];
   const dirs = prediction?.dirs ?? ["Westbound", "Eastbound"];
+  const weatherDelay = weather ? estimateWeatherDelay(weather) : prediction?.offsets.weather;
+  const displayedPrediction = prediction && weatherDelay !== undefined
+    ? {
+      ...prediction,
+      offsets: {
+        ...prediction.offsets,
+        weather: weatherDelay,
+      },
+    }
+    : prediction;
 
   return (
     <div className="bg-white flex flex-col min-h-full">
@@ -400,16 +490,18 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
               <button
                 key={d}
                 onClick={() => setDir(d)}
-                className={`flex-1 h-[36px] rounded-tl-[20px] rounded-tr-[20px] flex items-center justify-center cursor-pointer transition-colors ${dir === d ? "bg-white" : "bg-[#aaa]"}`}
+                className={`flex-1 h-[52px] min-w-0 rounded-tl-[20px] rounded-tr-[20px] flex items-center justify-center cursor-pointer transition-colors px-2 ${dir === d ? "bg-white" : "bg-[#aaa]"}`}
               >
-                <span className={`font-['SF_Compact',system-ui,sans-serif] text-[16px] tracking-[-0.08px] ${dir === d ? "text-[#4f4f4f]" : "text-white"}`}>{d}</span>
+                <span className={`font-['SF_Compact',system-ui,sans-serif] tracking-[-0.08px] text-center break-words overflow-hidden max-h-[38px] ${directionTextClass(d)} ${dir === d ? "text-[#4f4f4f]" : "text-white"}`}>
+                  {d}
+                </span>
               </button>
             ))}
           </div>
 
           {/* ETA detail panel */}
           <div className="mx-[11px] mb-[11px] bg-white rounded-bl-[20px] rounded-br-[20px] px-4 py-3">
-            {loadingPrediction || !prediction ? (
+            {loadingPrediction || !displayedPrediction ? (
               <div className="flex flex-col gap-3">
                 <div className="flex justify-between items-baseline">
                   <Skeleton className="h-4 w-40" />
@@ -425,26 +517,23 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
             ) : (
               <>
                 <div className="flex items-baseline justify-between mb-3">
-                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[14px] text-black tracking-[-0.08px] flex-1 mr-2">{prediction.stopName}</span>
+                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[14px] text-black tracking-[-0.08px] flex-1 mr-2">{displayedPrediction.stopName}</span>
                   <div className="flex items-baseline gap-1 shrink-0">
                     <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#656565]">est.</span>
-                    <span className="font-['Rowdies',sans-serif] text-[36px] text-[#4f4f4f] leading-none">{prediction.etaMin}</span>
+                    <span className="font-['Rowdies',sans-serif] text-[36px] text-[#4f4f4f] leading-none">{displayedPrediction.etaMin}</span>
                     <span className="font-['SF_Compact',system-ui,sans-serif] text-[14px] text-black">min.</span>
                   </div>
                 </div>
                 <div className="flex justify-between mb-3">
-                  <OffsetItem icon={<BusIcon />}          value={prediction.offsets.schedule}     label="schedule" />
-                  <OffsetItem icon={<CloudIcon />}         value={prediction.offsets.weather}      label="weather" />
-                  <OffsetItem icon={<TrafficIcon />}       value={prediction.offsets.traffic}      label="traffic" />
+                  <OffsetItem icon={<BusIcon />}          value={displayedPrediction.offsets.schedule}     label="schedule" />
+                  <OffsetItem icon={<CloudIcon />}         value={displayedPrediction.offsets.weather}      label="weather" />
+                  <OffsetItem icon={<TrafficIcon />}       value={displayedPrediction.offsets.traffic}      label="traffic" />
                 </div>
                 <div className="flex justify-between mb-3">
-                  <OffsetItem icon={<StarIcon />}          value={prediction.offsets.passengerLoad} label="crowding" />
-                  <OffsetItem icon={<WalkIcon />}          value={prediction.offsets.accidents}    label="incidents" />
-                  <OffsetItem icon={<ConstructionIcon />}  value={prediction.offsets.construction} label="construction" />
+                  <OffsetItem icon={<WalkIcon />}          value={displayedPrediction.offsets.accidents}    label="accidents" />
+                  <OffsetItem icon={<ConstructionIcon />}  value={displayedPrediction.offsets.construction} label="construction" />
+                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.other}        label="other" />
                 </div>
-                <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#656565] leading-[18px] mb-2">
-                  {prediction.summary} Confidence {prediction.confidence}%.
-                </p>
                 <button
                   onClick={() => selectedRoute !== null && dir !== null && onOpenReport(selectedRoute, dir)}
                   className="w-full text-center font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#4f4f4f] underline underline-offset-2 cursor-pointer pt-1"
@@ -461,26 +550,73 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
 }
 
 // ── Bus Report screen ──
-interface BusReportProps { route: number; dir: string; stopId: string; onClose: () => void }
-function BusReport({ route, dir, stopId, onClose }: BusReportProps) {
+interface BusReportProps {
+  route: number;
+  dir: string;
+  stopId: string;
+  mapCenter: [number, number];
+  onClose: () => void;
+}
+function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
   const [data, setData] = useState<BusReportData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
+
     setLoading(true);
-    apiBusReport(stopId, route, dir)
-      .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [stopId, route, dir]);
+    Promise.all([
+      apiBusReport(stopId, route, dir),
+      getCurrentWeather(mapCenter[0], mapCenter[1]).catch(() => null),
+      getTrafficImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
+    ])
+      .then(([report, currentWeather, trafficImpact]) => {
+        if (cancelled) return;
+
+        const nextReport: BusReportData = {
+          ...report,
+          factors: {
+            ...report.factors,
+          },
+        };
+
+        if (currentWeather) {
+          const weatherDelay = estimateWeatherDelay(currentWeather);
+          nextReport.factors.weather = {
+            value: weatherDelay,
+            description: describeWeatherDelay(currentWeather, weatherDelay),
+          };
+        }
+
+        if (trafficImpact) {
+          nextReport.factors.traffic = {
+            value: trafficImpact.trafficDelayMin,
+            description: describeTrafficDelay(trafficImpact, "traffic"),
+          };
+          nextReport.factors.accidents = {
+            value: trafficImpact.accidentDelayMin,
+            description: describeTrafficDelay(trafficImpact, "accident"),
+          };
+          nextReport.factors.construction = {
+            value: trafficImpact.constructionDelayMin,
+            description: describeTrafficDelay(trafficImpact, "construction"),
+          };
+        }
+
+        nextReport.confidence = estimateConfidenceFromFactors(nextReport.factors);
+        setData(nextReport);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [stopId, route, dir, mapCenter]);
 
   const iconMap: Record<string, React.ReactNode> = {
     schedule: <BusIcon />, weather: <CloudIcon />, traffic: <TrafficIcon />,
-    passengerLoad: <StarIcon />, accidents: <WalkIcon />, construction: <ConstructionIcon />,
-  };
-
-  const labelMap: Record<string, string> = {
-    passengerLoad: "crowding",
-    accidents: "incidents",
+    accidents: <WalkIcon />, construction: <ConstructionIcon />, other: <StarIcon />,
   };
 
   return (
@@ -505,7 +641,9 @@ function BusReport({ route, dir, stopId, onClose }: BusReportProps) {
                   <span className="font-['Rowdies',sans-serif] text-[38px] text-[#4f4f4f] leading-none">{data.etaMin}</span>
                   <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">min.</span>
                 </div>
-                <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#656565]">Confidence {data.confidence}%</span>
+                <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#656565]">
+                  Confidence {data.confidence ?? 82}%
+                </span>
               </>
             )}
           </div>
@@ -529,7 +667,7 @@ function BusReport({ route, dir, stopId, onClose }: BusReportProps) {
                   <span className="font-['Rowdies',sans-serif] text-[28px] leading-none text-[#7d7b7b]">{fmt(f.value)}</span>
                   <div className="flex items-center gap-1">
                     <div className="size-[16px] shrink-0">{iconMap[key]}</div>
-                    <span className="font-['SF_Compact',system-ui,sans-serif] text-[11px] text-[#656565] whitespace-nowrap">{labelMap[key] ?? key}</span>
+                    <span className="font-['SF_Compact',system-ui,sans-serif] text-[11px] text-[#656565] whitespace-nowrap">{key}</span>
                   </div>
                 </div>
                 <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black leading-[22px] flex-1 pt-1">{f.description}</p>
@@ -756,23 +894,20 @@ interface ChatMessage {
   text: string;
 }
 
-/** Centered milk icon — matches the Figma export pattern exactly */
 function MilkIcon({ size = 30 }: { size?: number }) {
   return (
     <div className="relative overflow-hidden shrink-0" style={{ width: size, height: size }}>
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <img
-          src={imgMilk}
-          alt="Milk bot"
-          className="absolute max-w-none pointer-events-none"
-          style={{
-            width: "120.83%",
-            height: "130.13%",
-            left: "-10.74%",
-            top: "-11.7%",
-          }}
-        />
-      </div>
+      <img
+        src={imgMilk}
+        alt="Milk bot"
+        className="absolute max-w-none pointer-events-none"
+        style={{
+          width: "120.83%",
+          height: "130.13%",
+          left: "-10.74%",
+          top: "-11.7%",
+        }}
+      />
     </div>
   );
 }
@@ -783,245 +918,135 @@ function AiChatbot() {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [assistantContext, setAssistantContext] = useState<TransitAssistantContext>({});
-
-  // Committed position (null = use CSS bottom-right default)
-  const [committedPos, setCommittedPos] = useState<{ x: number; y: number } | null>(null);
-  const btnRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
-  const hasDragged = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping]);
 
-  // Attach pointermove + pointerup to window so drag never loses events
-  useEffect(() => {
-    function onMove(e: PointerEvent) {
-      if (!dragRef.current || !btnRef.current) return;
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) hasDragged.current = true;
-      // Move the DOM node directly — no re-render, no pointer-capture loss
-      const newX = dragRef.current.origX + dx;
-      const newY = dragRef.current.origY + dy;
-      btnRef.current.style.left   = `${newX}px`;
-      btnRef.current.style.top    = `${newY}px`;
-      btnRef.current.style.right  = "auto";
-      btnRef.current.style.bottom = "auto";
-    }
-    function onUp(e: PointerEvent) {
-      if (!dragRef.current || !btnRef.current) { dragRef.current = null; return; }
-      const dx = e.clientX - dragRef.current.startX;
-      const dy = e.clientY - dragRef.current.startY;
-      const newX = dragRef.current.origX + dx;
-      const newY = dragRef.current.origY + dy;
-      dragRef.current = null;
-      // Commit to React state so position survives open/close
-      setCommittedPos({ x: newX, y: newY });
-    }
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-  }, []);
-
-  function onPointerDown(e: React.PointerEvent) {
-    if (open) return;
-    hasDragged.current = false;
-    const rect = btnRef.current!.getBoundingClientRect();
-    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: rect.left, origY: rect.top };
-  }
-
-  function handleButtonClick() {
-    if (!hasDragged.current) setOpen(true);
-  }
-
   async function sendMessage() {
     const text = input.trim();
     if (!text) return;
+
     setMessages(prev => [...prev, { role: "user", text }]);
     setInput("");
     setIsTyping(true);
+
     try {
       const answer = await askTransitAssistant(text, assistantContext);
       if (answer.context) setAssistantContext(answer.context);
       setMessages(prev => [...prev, { role: "ai", text: answer.text }]);
     } catch {
-      setMessages(prev => [...prev, { role: "ai", text: "I could not calculate that trip answer right now. Try asking about a route number, stop, delay, or destination." }]);
+      setMessages(prev => [...prev, {
+        role: "ai",
+        text: "I could not calculate that trip answer right now. Try asking about a route number, stop, delay, or destination.",
+      }]);
     } finally {
       setIsTyping(false);
     }
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
   }
 
-  if (open) {
-    return (
-      <>
-        {/* Backdrop */}
-        <div
-          className="fixed inset-0 z-[2000] pointer-events-auto"
-          onClick={() => setOpen(false)}
-        />
+  return (
+    <>
+      {open ? (
+        <>
+          <div
+            className="fixed inset-0 z-[2000] pointer-events-auto"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            className="fixed left-1/2 top-1/2 z-[2001] w-[min(100vw,390px)] h-[82vh] -translate-x-1/2 -translate-y-1/2 bg-white border-2 border-[#9d9d9d] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] flex flex-col overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 shrink-0 border-b border-[#e5e5e5]">
+              <span className="font-['Inter',system-ui,sans-serif] font-bold text-[16px] text-black leading-[1.4]">
+                Chat with Milk bot
+              </span>
+              <button
+                onClick={() => setOpen(false)}
+                className="size-6 flex items-center justify-center cursor-pointer opacity-70 hover:opacity-100"
+                aria-label="Minimize"
+              >
+                <CloseIcon />
+              </button>
+            </div>
 
-        {/* Panel — always centered */}
-        <div
-          className="pointer-events-auto bg-white border-2 border-[#9d9d9d] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] flex flex-col overflow-hidden"
-          style={{
-            position: "fixed",
-            top: "50%",
-            left: "50%",
-            transform: "translate(-50%, -50%)",
-            width: "min(100vw, 390px)",
-            height: "82vh",
-            zIndex: 2001,
-          }}
-          onClick={e => e.stopPropagation()}
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between px-5 py-4 shrink-0 border-b border-[#e5e5e5]">
-            <span className="font-['Inter',system-ui,sans-serif] font-bold text-[16px] text-black leading-[1.4]">
-              Chat with Milk bot
-            </span>
-            <button
-              onClick={() => setOpen(false)}
-              className="size-6 flex items-center justify-center cursor-pointer opacity-70 hover:opacity-100"
-              aria-label="Minimize"
-            >
-              <svg className="block size-full" fill="none" viewBox="0 0 14 14">
-                <path d="M1.4 14L0 12.6L5.6 7L0 1.4L1.4 0L7 5.6L12.6 0L14 1.4L8.4 7L14 12.6L12.6 14L7 8.4L1.4 14Z" fill="#1D1B20" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
-            {messages.map((m, i) => (
-              <div key={i} className={`flex gap-2 ${m.role === "user" ? "justify-end" : "justify-start items-start"}`}>
-                {m.role === "ai" && (
-                  <div className="shrink-0 mt-0.5">
-                    <MilkIcon size={30} />
+            <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
+              {messages.map((message, index) => (
+                <div key={index} className={`flex gap-2 ${message.role === "user" ? "justify-end" : "justify-start items-start"}`}>
+                  {message.role === "ai" && <MilkIcon size={30} />}
+                  <div
+                    className={`max-w-[75%] rounded-[8px] px-3 py-[6px] font-['Inter',system-ui,sans-serif] text-[15px] leading-[1.4] ${
+                      message.role === "user"
+                        ? "bg-[#f5f5f5] border border-[#d9d9d9] text-[#1e1e1e]"
+                        : "text-[#1e1e1e]"
+                    }`}
+                  >
+                    {message.text}
                   </div>
-                )}
-                <div
-                  className={`max-w-[75%] rounded-[8px] px-3 py-[6px] font-['Inter',system-ui,sans-serif] font-normal text-[15px] leading-[1.4] ${
-                    m.role === "user"
-                      ? "bg-[#f5f5f5] border border-[#d9d9d9] text-[#1e1e1e]"
-                      : "text-[#1e1e1e]"
-                  }`}
-                >
-                  {m.text}
                 </div>
-              </div>
-            ))}
-            {isTyping && (
-              <div className="flex gap-2 items-center">
-                <div className="shrink-0"><MilkIcon size={30} /></div>
-                <div className="bg-[#f5f5f5] border border-[#d9d9d9] rounded-[8px] px-3 py-2 flex gap-1 items-center">
-                  {[0, 1, 2].map(i => (
-                    <div
-                      key={i}
-                      className="size-[6px] rounded-full bg-[#b3b3b3]"
-                      style={{ animation: `bounce 1.2s ease-in-out ${i * 0.2}s infinite` }}
-                    />
-                  ))}
+              ))}
+              {isTyping && (
+                <div className="flex gap-2 items-center">
+                  <MilkIcon size={30} />
+                  <div className="bg-[#f5f5f5] border border-[#d9d9d9] rounded-[8px] px-3 py-2 font-['Inter',system-ui,sans-serif] text-[14px] text-[#656565]">
+                    Thinking...
+                  </div>
                 </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
 
-          {/* Input box */}
-          <div className="shrink-0 px-4 pb-4">
-            <div className="bg-white border border-[#d9d9d9] rounded-[16px] p-4 flex flex-col gap-4">
-              <textarea
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask me anything about commuting!"
-                rows={1}
-                className="w-full font-['Inter',system-ui,sans-serif] text-[16px] text-[#1e1e1e] placeholder:text-[#b3b3b3] leading-[1.4] resize-none outline-none bg-transparent"
-                style={{ minHeight: "22px", maxHeight: "88px" }}
-              />
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1">
-                  {/* Image icon */}
-                  <button className="p-2 rounded-full hover:bg-gray-100 opacity-70">
-                    <svg className="size-5" fill="none" viewBox="0 0 20 20">
-                      <rect x="1" y="3" width="18" height="14" rx="2" stroke="#1E1E1E" strokeWidth="2" />
-                      <circle cx="6.5" cy="7.5" r="1.5" stroke="#1E1E1E" strokeWidth="1.5" />
-                      <path d="M1 14l5-4 3 3 3-2.5 5 4" stroke="#1E1E1E" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                  {/* Code icon */}
-                  <button className="p-2 rounded-full hover:bg-gray-100 opacity-70">
-                    <svg className="size-5" fill="none" viewBox="0 0 20 14">
-                      <path d="M6 1L1 7l5 6M14 1l5 6-5 6" stroke="#1E1E1E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                  {/* Mic icon */}
-                  <button className="p-2 rounded-full hover:bg-gray-100 opacity-70">
-                    <svg className="size-5" fill="none" viewBox="0 0 14 20">
-                      <rect x="4" y="1" width="6" height="10" rx="3" stroke="#1E1E1E" strokeWidth="2" />
-                      <path d="M1 10c0 3.314 2.686 6 6 6s6-2.686 6-6M7 16v3" stroke="#1E1E1E" strokeWidth="2" strokeLinecap="round" />
+            <div className="shrink-0 px-4 pb-4">
+              <div className="bg-white border border-[#d9d9d9] rounded-[16px] p-4 flex flex-col gap-4">
+                <textarea
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask me anything about commuting!"
+                  rows={1}
+                  className="w-full font-['Inter',system-ui,sans-serif] text-[16px] text-[#1e1e1e] placeholder:text-[#b3b3b3] leading-[1.4] resize-none outline-none bg-transparent"
+                  style={{ minHeight: "22px", maxHeight: "88px" }}
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={sendMessage}
+                    disabled={!input.trim()}
+                    className="size-9 rounded-full flex items-center justify-center transition-colors cursor-pointer disabled:cursor-default"
+                    style={{ background: input.trim() ? "#1e1e1e" : "#d9d9d9" }}
+                    aria-label="Send"
+                  >
+                    <svg className="size-4" fill="none" viewBox="0 0 14 14">
+                      <path d="M7 12V2M7 2L2 7M7 2L12 7" stroke={input.trim() ? "white" : "#b3b3b3"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
                   </button>
                 </div>
-                {/* Send button */}
-                <button
-                  onClick={sendMessage}
-                  disabled={!input.trim()}
-                  className="size-9 rounded-full flex items-center justify-center transition-colors cursor-pointer disabled:cursor-default"
-                  style={{ background: input.trim() ? "#1e1e1e" : "#d9d9d9" }}
-                >
-                  <svg className="size-4" fill="none" viewBox="0 0 14 14">
-                    <path d="M7 12V2M7 2L2 7M7 2L12 7" stroke={input.trim() ? "white" : "#b3b3b3"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
               </div>
             </div>
           </div>
-        </div>
-
-        <style>{`
-          @keyframes bounce {
-            0%, 80%, 100% { transform: translateY(0); }
-            40% { transform: translateY(-5px); }
-          }
-        `}</style>
-      </>
-    );
-  }
-
-  // Floating button — CSS bottom-right by default; explicit left/top after first drag
-  const btnStyle: React.CSSProperties = committedPos
-    ? { position: "fixed", left: committedPos.x, top: committedPos.y, touchAction: "none" }
-    : { position: "fixed", right: 20, bottom: 100, touchAction: "none" };
-
-  return (
-    <div
-      ref={btnRef}
-      className="z-[2000] cursor-grab active:cursor-grabbing select-none"
-      style={btnStyle}
-      onPointerDown={onPointerDown}
-      onClick={handleButtonClick}
-    >
-      <div
-        className="bg-white rounded-[32px] flex items-center justify-center"
-        style={{
-          width: 50,
-          height: 50,
-          boxShadow: "0px 4px 4px rgba(0,0,0,0.15), 0px 1px 1.5px rgba(0,0,0,0.3)",
-        }}
-      >
-        <MilkIcon size={30} />
-      </div>
-    </div>
+        </>
+      ) : (
+        <button
+          onClick={() => setOpen(true)}
+          className="fixed right-5 bottom-[100px] z-[2000] bg-white rounded-[32px] flex items-center justify-center cursor-pointer"
+          style={{
+            width: 50,
+            height: 50,
+            boxShadow: "0px 4px 4px rgba(0,0,0,0.15), 0px 1px 1.5px rgba(0,0,0,0.3)",
+          }}
+          aria-label="Open Milk bot"
+        >
+          <MilkIcon size={30} />
+        </button>
+      )}
+    </>
   );
 }
 
@@ -1129,6 +1154,7 @@ export default function App() {
             route={screen.route}
             dir={screen.dir}
             stopId={screen.stopId}
+            mapCenter={mapCenter}
             onClose={handleCloseReport}
           />
         ) : screen.id === "destNav" ? (
