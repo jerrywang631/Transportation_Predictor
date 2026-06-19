@@ -70,10 +70,18 @@ router.get("/bus-report", (req, res, next) => {
 
 router.get("/navigation", (req, res, next) => {
   try {
+    const originLat = Number(req.query.originLat);
+    const originLng = Number(req.query.originLng);
+    const originCoordinates =
+      Number.isFinite(originLat) && Number.isFinite(originLng)
+        ? { lat: originLat, lng: originLng }
+        : undefined;
+
     res.json(
       getNavigationRoute(
         String(req.query.origin ?? ""),
         String(req.query.destination ?? ""),
+        originCoordinates,
       ),
     );
   } catch (error) {
