@@ -219,6 +219,18 @@ function OffsetItem({ icon, value, label }: OffsetItemProps) {
   );
 }
 
+function directionTextClass(label: string) {
+  if (label.length > 44) {
+    return "text-[10px] leading-[12px]";
+  }
+
+  if (label.length > 30) {
+    return "text-[11px] leading-[13px]";
+  }
+
+  return "text-[13px] leading-[15px]";
+}
+
 // ─── Screen components ────────────────────────────────────────────────────────
 
 // ── Search overlay ──
@@ -454,9 +466,11 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
               <button
                 key={d}
                 onClick={() => setDir(d)}
-                className={`flex-1 h-[36px] rounded-tl-[20px] rounded-tr-[20px] flex items-center justify-center cursor-pointer transition-colors ${dir === d ? "bg-white" : "bg-[#aaa]"}`}
+                className={`flex-1 h-[52px] min-w-0 rounded-tl-[20px] rounded-tr-[20px] flex items-center justify-center cursor-pointer transition-colors px-2 ${dir === d ? "bg-white" : "bg-[#aaa]"}`}
               >
-                <span className={`font-['SF_Compact',system-ui,sans-serif] text-[16px] tracking-[-0.08px] ${dir === d ? "text-[#4f4f4f]" : "text-white"}`}>{d}</span>
+                <span className={`font-['SF_Compact',system-ui,sans-serif] tracking-[-0.08px] text-center break-words overflow-hidden max-h-[38px] ${directionTextClass(d)} ${dir === d ? "text-[#4f4f4f]" : "text-white"}`}>
+                  {d}
+                </span>
               </button>
             ))}
           </div>
