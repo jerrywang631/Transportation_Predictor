@@ -3,6 +3,7 @@ import "dotenv/config";
 import express from "express";
 
 import ttcRouter from "./routes/ttc";
+import trafficRouter from "./routes/traffic";
 import weatherRouter from "./routes/weather";
 
 const app = express();
@@ -17,6 +18,7 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api/weather", weatherRouter);
 app.use("/api/ttc", ttcRouter);
+app.use("/api/traffic", trafficRouter);
 
 app.use(
   (

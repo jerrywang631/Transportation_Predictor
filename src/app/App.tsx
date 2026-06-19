@@ -111,6 +111,10 @@ import {
   getCurrentWeather,
   type CurrentWeather,
 } from "@/api/weather";
+import {
+  getTrafficImpact,
+  type TrafficImpact,
+} from "@/api/traffic";
 
 function estimateWeatherDelay(weather: CurrentWeather): number {
   const condition = weather.condition.toLowerCase();
@@ -136,6 +140,18 @@ function describeWeatherDelay(weather: CurrentWeather, delay: number): string {
   }
 
   return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. Current conditions may add about ${delay} min to this trip.`;
+}
+
+function describeTrafficDelay(impact: TrafficImpact, key: "traffic" | "accident" | "construction") {
+  const event = impact.events.find(item => item.type === key || (key === "accident" && item.type === "accident"));
+
+  if (event) {
+    return `${event.title}. ${event.description}`;
+  }
+
+  if (key === "traffic") return "Traffic is normal, no additional delay expected.";
+  if (key === "accident") return "No traffic incidents are reported near this route.";
+  return "No construction activity is reported near this route.";
 }
 
 // ─── Shared loading skeleton ──────────────────────────────────────────────────
@@ -544,28 +560,42 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
     Promise.all([
       apiBusReport(stopId, route, dir),
       getCurrentWeather(mapCenter[0], mapCenter[1]).catch(() => null),
+      getTrafficImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
     ])
-      .then(([report, currentWeather]) => {
+      .then(([report, currentWeather, trafficImpact]) => {
         if (cancelled) return;
 
-        if (!currentWeather) {
-          setData(report);
-          setLoading(false);
-          return;
-        }
-
-        const weatherDelay = estimateWeatherDelay(currentWeather);
-
-        setData({
+        const nextReport: BusReportData = {
           ...report,
           factors: {
             ...report.factors,
-            weather: {
-              value: weatherDelay,
-              description: describeWeatherDelay(currentWeather, weatherDelay),
-            },
           },
-        });
+        };
+
+        if (currentWeather) {
+          const weatherDelay = estimateWeatherDelay(currentWeather);
+          nextReport.factors.weather = {
+            value: weatherDelay,
+            description: describeWeatherDelay(currentWeather, weatherDelay),
+          };
+        }
+
+        if (trafficImpact) {
+          nextReport.factors.traffic = {
+            value: trafficImpact.trafficDelayMin,
+            description: describeTrafficDelay(trafficImpact, "traffic"),
+          };
+          nextReport.factors.accidents = {
+            value: trafficImpact.accidentDelayMin,
+            description: describeTrafficDelay(trafficImpact, "accident"),
+          };
+          nextReport.factors.construction = {
+            value: trafficImpact.constructionDelayMin,
+            description: describeTrafficDelay(trafficImpact, "construction"),
+          };
+        }
+
+        setData(nextReport);
         setLoading(false);
       })
       .catch(() => {
