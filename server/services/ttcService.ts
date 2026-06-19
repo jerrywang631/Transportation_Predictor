@@ -64,6 +64,10 @@ export interface BusReport {
 
 export interface NavigationRoute {
   source: TransitSource;
+  originCoordinates?: {
+    lat: number;
+    lng: number;
+  };
   destName: string;
   destAddress: string;
   walkMin: number;
@@ -843,6 +847,7 @@ export const getBusReport = (
 export const getNavigationRoute = (
   origin: string,
   destination: string,
+  originCoordinates?: { lat: number; lng: number },
 ): NavigationRoute => {
   const dest = DEST_DB[destination];
   if (!dest) throw new Error(`Unknown destination: ${destination}`);
@@ -851,6 +856,7 @@ export const getNavigationRoute = (
 
   return {
     source: "mock",
+    ...(originCoordinates ? { originCoordinates } : {}),
     destName: dest.name,
     destAddress: dest.address,
     walkMin: dest.walkMin,

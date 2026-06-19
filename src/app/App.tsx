@@ -4,21 +4,24 @@ import imgBike from "@/imports/DestinationNavigation/cb0afd1c8831cacec947b71a1ac
 import imgMilk from "@/imports/Map501WestboundSelected-2/e8d0b21b247328a8e92836e60bd74ba4fda1cb94.png";
 
 const TORONTO: [number, number] = [43.6532, -79.3832];
+type LocationStatus = "locating" | "ready" | "denied" | "unavailable" | "timeout";
 
 interface LeafletMapProps {
   center: [number, number];
   zoom: number;
   userPos: [number, number] | null;
-  stops?: typeof STOP_PINS;
+  locationStatus?: LocationStatus;
+  stops?: NearbyStop[];
   onSelectStop?: (id: string) => void;
   className?: string;
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, stops, onSelectStop, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, locationStatus, stops, onSelectStop, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
+  const stopMarkersRef = useRef<L.Marker[]>([]);
 
   // Boot the map once
   useEffect(() => {
@@ -34,8 +37,8 @@ function LeafletMap({ center, zoom, userPos, stops, onSelectStop, className }: L
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
 
-    // Stop markers
-    if (stops) {
+    // Stop markers render in a separate effect so async nearby stops can update.
+    if (false && stops) {
       stops.forEach(s => {
         const icon = L.divIcon({
           className: "",
@@ -76,7 +79,50 @@ function LeafletMap({ center, zoom, userPos, stops, onSelectStop, className }: L
     }
   }, [userPos]);
 
-  return <div ref={containerRef} className={className} style={{ height: "100%", width: "100%" }} />;
+  // Stop markers update after nearby stops load or the map center changes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    stopMarkersRef.current.forEach(marker => marker.remove());
+    stopMarkersRef.current = [];
+
+    stops?.forEach(s => {
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:30px;height:30px;background:#fff;border:2px solid #1D1B20;border-radius:9px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.28)"><svg width="17" height="17" viewBox="0 0 16 19" aria-hidden="true"><path d="${P.bus}" fill="#1D1B20"/></svg></div>`,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15],
+      });
+      const marker = L.marker(s.pos, { icon }).addTo(map);
+      marker.bindTooltip(s.name, { permanent: false, direction: "top", offset: [0, -18] });
+      if (onSelectStop) marker.on("click", () => onSelectStop(s.stopId));
+      stopMarkersRef.current.push(marker);
+    });
+
+    return () => {
+      stopMarkersRef.current.forEach(marker => marker.remove());
+      stopMarkersRef.current = [];
+    };
+  }, [stops, onSelectStop]);
+
+  const locationLabel =
+    locationStatus === "locating" ? "Locating..."
+      : locationStatus === "denied" ? "Location permission denied"
+      : locationStatus === "timeout" ? "Location timeout"
+      : locationStatus === "unavailable" ? "Location unavailable"
+      : null;
+
+  return (
+    <div className={`relative ${className ?? ""}`} style={{ height: "100%", width: "100%" }}>
+      <div ref={containerRef} style={{ height: "100%", width: "100%" }} />
+      {locationLabel && !userPos && (
+        <div className="absolute right-2 top-2 z-[1001] rounded-full bg-white/95 px-2.5 py-1 text-[11px] text-[#585858] shadow-sm">
+          {locationLabel}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── SVG path data ────────────────────────────────────────────────────────────
@@ -345,13 +391,14 @@ interface MapScreenProps {
   showControls: boolean;
   mapCenter: [number, number];
   userPos: [number, number] | null;
+  locationStatus: LocationStatus;
   onSearch: () => void;
   onOpenReport: (route: number, dir: string) => void;
   onBack: () => void;
   onSwitchToDest: () => void;
   onSelectStop: (id: string) => void;
 }
-function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenReport, onBack, onSwitchToDest, onSelectStop }: MapScreenProps) {
+function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, onSearch, onOpenReport, onBack, onSwitchToDest, onSelectStop }: MapScreenProps) {
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [loadingPrediction, setLoadingPrediction] = useState(true);
   const [selectedRoute, setSelectedRoute] = useState<number | null>(null);
@@ -446,6 +493,7 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, onSearch, onOpenR
             center={mapCenter}
             zoom={15}
             userPos={userPos}
+            locationStatus={locationStatus}
             stops={nearbyStops}
             onSelectStop={onSelectStop}
           />
@@ -685,20 +733,21 @@ interface DestNavProps {
   destId: string;
   mapCenter: [number, number];
   userPos: [number, number] | null;
+  locationStatus: LocationStatus;
   onStartNavigation: () => void;
   onBack: () => void;
   onSwitchToStop: () => void;
 }
-function DestNavScreen({ destId, mapCenter, userPos, onStartNavigation, onBack, onSwitchToStop }: DestNavProps) {
+function DestNavScreen({ destId, mapCenter, userPos, locationStatus, onStartNavigation, onBack, onSwitchToStop }: DestNavProps) {
   const [route, setRoute] = useState<NavigationRoute | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    getNavigationRoute("current-location", destId)
+    getNavigationRoute("current-location", destId, userPos)
       .then(r => { setRoute(r); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [destId]);
+  }, [destId, userPos]);
 
   type Mode = "bus" | "car" | "walk" | "bike";
   const [mode, setMode] = useState<Mode>("bus");
@@ -732,7 +781,7 @@ function DestNavScreen({ destId, mapCenter, userPos, onStartNavigation, onBack, 
       {/* Map */}
       <div className="px-[25px] mt-[10px] shrink-0">
         <div className="rounded-[8px] overflow-hidden h-[200px] w-full">
-          <LeafletMap center={mapCenter} zoom={14} userPos={userPos} />
+          <LeafletMap center={mapCenter} zoom={14} userPos={userPos} locationStatus={locationStatus} />
         </div>
       </div>
 
@@ -834,19 +883,19 @@ function DestNavScreen({ destId, mapCenter, userPos, onStartNavigation, onBack, 
 }
 
 // ── Navigation screen ──
-interface NavScreenProps { destId: string; mapCenter: [number, number]; userPos: [number, number] | null; onClose: () => void }
-function NavScreen({ destId, mapCenter, userPos, onClose }: NavScreenProps) {
+interface NavScreenProps { destId: string; mapCenter: [number, number]; userPos: [number, number] | null; locationStatus: LocationStatus; onClose: () => void }
+function NavScreen({ destId, mapCenter, userPos, locationStatus, onClose }: NavScreenProps) {
   const [route, setRoute] = useState<NavigationRoute | null>(null);
 
   useEffect(() => {
-    getNavigationRoute("current-location", destId).then(setRoute).catch(() => null);
-  }, [destId]);
+    getNavigationRoute("current-location", destId, userPos).then(setRoute).catch(() => null);
+  }, [destId, userPos]);
 
   return (
     <div className="bg-white relative h-full min-h-screen">
       {/* Full-screen map */}
       <div className="absolute inset-0">
-        <LeafletMap center={mapCenter} zoom={16} userPos={userPos} className="absolute inset-0" />
+        <LeafletMap center={mapCenter} zoom={16} userPos={userPos} locationStatus={locationStatus} className="absolute inset-0" />
       </div>
 
       {/* Close button */}
@@ -1063,13 +1112,34 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [userPos, setUserPos] = useState<[number, number] | null>(null);
+  const [locationStatus, setLocationStatus] = useState<LocationStatus>("locating");
 
   useEffect(() => {
-    navigator.geolocation.getCurrentPosition(
-      pos => setUserPos([pos.coords.latitude, pos.coords.longitude]),
-      () => setUserPos(null),
-      { timeout: 8000 }
+    if (!navigator.geolocation) {
+      setLocationStatus("unavailable");
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      pos => {
+        setUserPos([pos.coords.latitude, pos.coords.longitude]);
+        setLocationStatus("ready");
+      },
+      error => {
+        setLocationStatus(
+          error.code === error.PERMISSION_DENIED ? "denied"
+            : error.code === error.TIMEOUT ? "timeout"
+            : "unavailable"
+        );
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 10000,
+      }
     );
+
+    return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
   const mapCenter: [number, number] = userPos ?? TORONTO;
@@ -1143,6 +1213,7 @@ export default function App() {
             showControls={screen.fromSearch}
             mapCenter={mapCenter}
             userPos={userPos}
+            locationStatus={locationStatus}
             onSearch={() => setSearching(true)}
             onOpenReport={handleOpenReport}
             onBack={() => setScreen({ id: "map", stopId: "college-yonge", fromSearch: false })}
@@ -1162,6 +1233,7 @@ export default function App() {
             destId={screen.destId}
             mapCenter={mapCenter}
             userPos={userPos}
+            locationStatus={locationStatus}
             onStartNavigation={handleStartNavigation}
             onBack={handleBackFromDest}
             onSwitchToStop={handleSwitchToStopSearch}
@@ -1171,6 +1243,7 @@ export default function App() {
             destId={screen.destId}
             mapCenter={mapCenter}
             userPos={userPos}
+            locationStatus={locationStatus}
             onClose={handleCloseNavigation}
           />
         ) : null}

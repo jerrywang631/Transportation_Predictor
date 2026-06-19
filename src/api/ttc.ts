@@ -75,6 +75,10 @@ export interface BusReport {
 
 export interface NavigationRoute {
   source: TransitSource;
+  originCoordinates?: {
+    lat: number;
+    lng: number;
+  };
   destName: string;
   destAddress: string;
   walkMin: number;
@@ -160,9 +164,15 @@ export function getBusReport(
 export function getNavigationRoute(
   origin: string,
   destination: string,
+  originPos?: [number, number] | null,
 ): Promise<NavigationRoute> {
   return apiRequest<NavigationRoute>("/api/ttc/navigation", {
-    params: { origin, destination },
+    params: {
+      origin,
+      destination,
+      originLat: originPos?.[0],
+      originLng: originPos?.[1],
+    },
   });
 }
 
