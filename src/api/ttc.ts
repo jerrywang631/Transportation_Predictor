@@ -278,6 +278,10 @@ function isRouteNumberOnlyDestination(query: string | undefined): number | undef
   return routeId ? Number(routeId) : undefined;
 }
 
+function isRouteNumberOnlyInput(input: string): boolean {
+  return /^([1-9]\d{1,2})$/.test(input.trim());
+}
+
 function extractStopQuery(input: string): string | undefined {
   const cleaned = input.trim().replace(/[?.!]+$/, "");
   const patterns = [
@@ -919,6 +923,10 @@ async function pickAssistantPrediction(
   const directionFromText = findDirectionInText(input) ?? context.direction;
   let stopId = context.stopId;
 
+  if (!stopId && routeId && isRouteNumberOnlyInput(input)) {
+    throw new Error("Route number needs a stop context");
+  }
+
   if (!stopId) {
     const stopQuery = extractStopQuery(input);
     const stops = await searchStops(stopQuery || (routeId && followUpWithRouteContext ? String(routeId) : input));
@@ -931,11 +939,19 @@ async function pickAssistantPrediction(
 
   let meta = await getStopMeta(stopId);
   if (routeId && !meta.routes.includes(routeId)) {
-    const routeStops = await searchStops(String(routeId));
-    const matchingStop = routeStops.find(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
-    if (matchingStop) {
-      stopId = matchingStop.id;
-      meta = await getStopMeta(stopId);
+    const stopQuery = extractStopQuery(input);
+
+    if (stopQuery) {
+      const routeStops = await searchStops(stopQuery);
+      const matchingStop = routeStops.find(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
+      if (matchingStop) {
+        stopId = matchingStop.id;
+        meta = await getStopMeta(stopId);
+      }
+    }
+
+    if (!meta.routes.includes(routeId)) {
+      throw new Error(`Route ${routeId} is not available at this stop`);
     }
   }
 
@@ -1079,6 +1095,23 @@ export async function askTransitAssistant(
       text: `Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}. ${summary}. Confidence: ${confidence}%.`,
     };
   } catch {
+    const routeOnly = findRouteInText(q);
+    if (routeOnly && isRouteNumberOnlyInput(q)) {
+      return {
+        matchedIntent: "help",
+        confidence: 76,
+        context: {
+          ...context,
+          routeId: routeOnly,
+          pendingRouteClarification: routeOnly,
+          lastIntent: "help",
+        },
+        text: context.stopId
+          ? `I do not see route ${routeOnly} at the current stop for the active service period. Try selecting a stop served by ${routeOnly}, or ask with a stop name like "when is ${routeOnly} at College?"`
+          : `Route ${routeOnly} needs a stop before I can estimate arrival time. Try asking "when is ${routeOnly} at College?" or select a stop on the map first.`,
+      };
+    }
+
     return {
       matchedIntent: "help",
       confidence: 65,
