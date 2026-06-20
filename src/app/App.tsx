@@ -21,13 +21,14 @@ interface LeafletMapProps {
     mode: "BUS" | "STREETCAR" | "SUBWAY" | "TRANSIT";
     label: string;
   }>;
+  selectedStopId?: string;
   onSelectStop?: (id: string) => void;
   onMoveEnd?: (center: [number, number]) => void;
   className?: string;
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
@@ -35,6 +36,7 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
   const routeLineRef = useRef<L.Polyline | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
   const transitMarkersRef = useRef<L.Marker[]>([]);
+  const skipNextMoveEndRef = useRef(false);
 
   // Boot the map once
   useEffect(() => {
@@ -51,6 +53,11 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
 
     map.on("moveend", () => {
+      if (skipNextMoveEndRef.current) {
+        skipNextMoveEndRef.current = false;
+        return;
+      }
+
       const nextCenter = map.getCenter();
       onMoveEnd?.([nextCenter.lat, nextCenter.lng]);
     });
@@ -77,7 +84,19 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
 
   // Recenter when center changes
   useEffect(() => {
-    mapRef.current?.setView(center, zoom);
+    const map = mapRef.current;
+    if (!map) return;
+
+    const currentCenter = map.getCenter();
+    const alreadyCentered =
+      Math.abs(currentCenter.lat - center[0]) < 0.00001 &&
+      Math.abs(currentCenter.lng - center[1]) < 0.00001 &&
+      map.getZoom() === zoom;
+
+    if (alreadyCentered) return;
+
+    skipNextMoveEndRef.current = true;
+    map.setView(center, zoom, { animate: false });
   }, [center[0], center[1], zoom]);             // eslint-disable-line react-hooks/exhaustive-deps
 
   // User location marker
@@ -106,15 +125,21 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
     stopMarkersRef.current = [];
 
     stops?.forEach(s => {
+      const selected = s.stopId === selectedStopId;
       const icon = L.divIcon({
         className: "",
-        html: `<div style="width:30px;height:30px;background:#fff;border:2px solid #1D1B20;border-radius:9px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.28)"><svg width="17" height="17" viewBox="0 0 16 19" aria-hidden="true"><path d="${P.bus}" fill="#1D1B20"/></svg></div>`,
-        iconSize: [30, 30],
-        iconAnchor: [15, 15],
+        html: `<div style="width:${selected ? 36 : 30}px;height:${selected ? 36 : 30}px;background:${selected ? "#FFD84D" : "#fff"};border:${selected ? 3 : 2}px solid #1D1B20;border-radius:9px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.28);transform:${selected ? "translate(-3px,-3px)" : "none"}"><svg width="17" height="17" viewBox="0 0 16 19" aria-hidden="true"><path d="${P.bus}" fill="#1D1B20"/></svg></div>`,
+        iconSize: selected ? [36, 36] : [30, 30],
+        iconAnchor: selected ? [18, 18] : [15, 15],
       });
       const marker = L.marker(s.pos, { icon }).addTo(map);
       marker.bindTooltip(s.name, { permanent: false, direction: "top", offset: [0, -18] });
-      if (onSelectStop) marker.on("click", () => onSelectStop(s.stopId));
+      if (onSelectStop) {
+        marker.on("click", event => {
+          L.DomEvent.stopPropagation(event);
+          onSelectStop(s.stopId);
+        });
+      }
       stopMarkersRef.current.push(marker);
     });
 
@@ -122,7 +147,7 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
       stopMarkersRef.current.forEach(marker => marker.remove());
       stopMarkersRef.current = [];
     };
-  }, [stops, onSelectStop]);
+  }, [stops, selectedStopId, onSelectStop]);
 
   // Navigation route line
   useEffect(() => {
@@ -562,8 +587,9 @@ interface MapScreenProps {
   onBack: () => void;
   onSwitchToDest: () => void;
   onSelectStop: (id: string) => void;
+  onMapMove: (center: [number, number]) => void;
 }
-function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, onSearch, onOpenReport, onBack, onSwitchToDest, onSelectStop }: MapScreenProps) {
+function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, onSearch, onOpenReport, onBack, onSwitchToDest, onSelectStop, onMapMove }: MapScreenProps) {
   const [prediction, setPrediction] = useState<Prediction | null>(null);
   const [loadingPrediction, setLoadingPrediction] = useState(true);
   const [selectedRoute, setSelectedRoute] = useState<number | null>(null);
@@ -684,8 +710,10 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
             userPos={userPos}
             locationStatus={locationStatus}
             stops={nearbyStops}
+            selectedStopId={stopId}
             onSelectStop={onSelectStop}
             onMoveEnd={center => {
+              onMapMove(center);
               getNearbyStops(center[0], center[1]).then(setNearbyStops);
             }}
           />
@@ -1279,7 +1307,9 @@ function AiChatbot() {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [assistantContext, setAssistantContext] = useState<TransitAssistantContext>({});
+  const [confirmClose, setConfirmClose] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1287,10 +1317,11 @@ function AiChatbot() {
 
   async function sendMessage() {
     const text = input.trim();
-    if (!text) return;
+    if (!text || isTyping) return;
 
     setMessages(prev => [...prev, { role: "user", text }]);
     setInput("");
+    if (chatInputRef.current) chatInputRef.current.value = "";
     setIsTyping(true);
 
     try {
@@ -1304,6 +1335,7 @@ function AiChatbot() {
       }]);
     } finally {
       setIsTyping(false);
+      requestAnimationFrame(() => chatInputRef.current?.focus());
     }
   }
 
@@ -1314,13 +1346,32 @@ function AiChatbot() {
     }
   }
 
+  function requestCloseChat() {
+    setConfirmClose(true);
+  }
+
+  function endChatSession() {
+    setMessages([]);
+    setInput("");
+    if (chatInputRef.current) chatInputRef.current.value = "";
+    setIsTyping(false);
+    setAssistantContext({});
+    setConfirmClose(false);
+    setOpen(false);
+  }
+
+  function keepChatSession() {
+    setConfirmClose(false);
+    setOpen(false);
+  }
+
   return (
     <>
       {open ? (
         <>
           <div
             className="fixed inset-0 z-[2000] pointer-events-auto"
-            onClick={() => setOpen(false)}
+            onClick={requestCloseChat}
           />
           <div
             className="fixed left-1/2 top-1/2 z-[2001] w-[min(100vw,390px)] h-[82vh] -translate-x-1/2 -translate-y-1/2 bg-white border-2 border-[#9d9d9d] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] flex flex-col overflow-hidden"
@@ -1331,7 +1382,7 @@ function AiChatbot() {
                 Chat with Milk bot
               </span>
               <button
-                onClick={() => setOpen(false)}
+                onClick={requestCloseChat}
                 className="size-6 flex items-center justify-center cursor-pointer opacity-70 hover:opacity-100"
                 aria-label="Minimize"
               >
@@ -1368,6 +1419,7 @@ function AiChatbot() {
             <div className="shrink-0 px-4 pb-4">
               <div className="bg-white border border-[#d9d9d9] rounded-[16px] p-4 flex flex-col gap-4">
                 <textarea
+                  ref={chatInputRef}
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
@@ -1379,18 +1431,45 @@ function AiChatbot() {
                 <div className="flex justify-end">
                   <button
                     onClick={sendMessage}
-                    disabled={!input.trim()}
+                    disabled={!input.trim() || isTyping}
                     className="size-9 rounded-full flex items-center justify-center transition-colors cursor-pointer disabled:cursor-default"
-                    style={{ background: input.trim() ? "#1e1e1e" : "#d9d9d9" }}
+                    style={{ background: input.trim() && !isTyping ? "#1e1e1e" : "#d9d9d9" }}
                     aria-label="Send"
                   >
                     <svg className="size-4" fill="none" viewBox="0 0 14 14">
-                      <path d="M7 12V2M7 2L2 7M7 2L12 7" stroke={input.trim() ? "white" : "#b3b3b3"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M7 12V2M7 2L2 7M7 2L12 7" stroke={input.trim() && !isTyping ? "white" : "#b3b3b3"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
                   </button>
                 </div>
               </div>
             </div>
+
+            {confirmClose && (
+              <div className="absolute inset-0 z-[1] bg-white/85 flex items-center justify-center px-6">
+                <div className="w-full bg-white border border-[#d9d9d9] rounded-[16px] shadow-[0px_4px_12px_rgba(0,0,0,0.18)] p-5">
+                  <p className="font-['Inter',system-ui,sans-serif] text-[16px] font-semibold text-[#1e1e1e] leading-[1.4]">
+                    End the chat session?
+                  </p>
+                  <p className="font-['Inter',system-ui,sans-serif] text-[14px] text-[#656565] leading-[1.4] mt-2">
+                    Choosing yes will clear this chat history.
+                  </p>
+                  <div className="flex gap-3 mt-5">
+                    <button
+                      onClick={keepChatSession}
+                      className="flex-1 h-10 rounded-[10px] border border-[#d9d9d9] font-['Inter',system-ui,sans-serif] text-[14px] text-[#1e1e1e]"
+                    >
+                      No
+                    </button>
+                    <button
+                      onClick={endChatSession}
+                      className="flex-1 h-10 rounded-[10px] bg-[#1e1e1e] font-['Inter',system-ui,sans-serif] text-[14px] text-white"
+                    >
+                      Yes
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </>
       ) : (
@@ -1472,8 +1551,10 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [userPos, setUserPos] = useState<[number, number] | null>(null);
   const [originOverride, setOriginOverride] = useState<OriginSelection | null>(null);
+  const [mapCenter, setMapCenter] = useState<[number, number]>(TORONTO);
   const [locationStatus, setLocationStatus] = useState<LocationStatus>("locating");
   const [homeStopId, setHomeStopId] = useState("college-yonge");
+  const initializedLocationRef = useRef(false);
   const canvasScale = useCanvasScale();
 
   useEffect(() => {
@@ -1484,7 +1565,12 @@ export default function App() {
 
     const watchId = navigator.geolocation.watchPosition(
       pos => {
-        setUserPos([pos.coords.latitude, pos.coords.longitude]);
+        const nextPos: [number, number] = [pos.coords.latitude, pos.coords.longitude];
+        setUserPos(nextPos);
+        if (!initializedLocationRef.current) {
+          initializedLocationRef.current = true;
+          setMapCenter(nextPos);
+        }
         setLocationStatus("ready");
       },
       error => {
@@ -1506,7 +1592,6 @@ export default function App() {
 
   const effectiveOriginPos = originOverride?.pos ?? userPos ?? TORONTO;
   const effectiveOriginLabel = originOverride?.label ?? "Your location";
-  const mapCenter: [number, number] = effectiveOriginPos ?? TORONTO;
 
   useEffect(() => {
     if (screen.id !== "loading") return;
@@ -1535,6 +1620,9 @@ export default function App() {
     setSearchTarget("general");
     setQuery("");
     setScreen({ id: "map", stopId, fromSearch: true });
+    getStopMeta(stopId)
+      .then(meta => setMapCenter(meta.pos))
+      .catch(() => null);
   };
 
   const handleSelectDest = (destId: string) => {
@@ -1546,6 +1634,7 @@ export default function App() {
 
   const handleSelectOrigin = (origin: OriginSelection) => {
     setOriginOverride(origin);
+    setMapCenter(origin.pos);
     setSearching(false);
     setSearchTarget("general");
     setQuery("");
@@ -1553,6 +1642,7 @@ export default function App() {
 
   const handleSelectCurrentLocation = () => {
     setOriginOverride(null);
+    if (userPos) setMapCenter(userPos);
     setSearching(false);
     setSearchTarget("general");
     setQuery("");
@@ -1642,7 +1732,7 @@ export default function App() {
         className="w-[390px] min-h-[844px] bg-white relative overflow-x-hidden origin-top"
         style={{
           transform: `scale(${canvasScale})`,
-          transformOrigin: "top center",
+          transformOrigin: "top left",
         }}
       >
         {searching ? (
@@ -1675,7 +1765,8 @@ export default function App() {
             onOpenReport={handleOpenReport}
             onBack={() => setScreen({ id: "map", stopId: homeStopId, fromSearch: false })}
             onSwitchToDest={handleUseCurrentStopAsDestination}
-            onSelectStop={stopId => setScreen({ id: "map", stopId, fromSearch: true })}
+            onSelectStop={handleSelectStop}
+            onMapMove={setMapCenter}
           />
         ) : screen.id === "busReport" ? (
           <BusReport

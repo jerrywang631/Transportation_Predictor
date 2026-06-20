@@ -1,6 +1,9 @@
 node_modules/
 dist/
-data/
+data/*
+!data/gtfs-slim.sqlite
+!data/construction/
+!data/construction/Road-reconstruction-program.geojson
 
 .env
 .env.local
