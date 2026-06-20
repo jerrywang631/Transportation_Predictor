@@ -113,6 +113,8 @@ export interface TransitAssistantContext {
   routeId?: number;
   direction?: string;
   destinationId?: string;
+  navigationEtaMin?: number;
+  navigationArrivalTime?: string;
   lastIntent?: TransitAssistantAnswer["matchedIntent"];
 }
 
@@ -214,7 +216,15 @@ function extractDestinationQuery(input: string): string | undefined {
 }
 
 function isDestinationFollowUp(input: string): boolean {
-  return /\b(?:how\s+about|what\s+about|that\s+trip|the\s+trip|same\s+destination|there|destination|arrival|arrive|walk|ride|stops|directions?|navigate)\b/i.test(input);
+  return /\b(?:how\s+about|what\s+about|that\s+trip|the\s+trip|same\s+destination|there|destination|arrival|arrive|walk|ride|stops|directions?|navigate|miss|missed|next\s+(?:one|bus|vehicle|streetcar)|another\s+(?:one|bus|vehicle|streetcar)|more\s+options?|other\s+options?|any\s+other|alternatives?|alternate\s+(?:routes?|ways?)|other\s+ways?|different\s+routes?|what\s+else|something\s+else|choices?)\b/i.test(input);
+}
+
+function isNextVehicleFollowUp(input: string): boolean {
+  return /\b(?:miss|missed|next\s+(?:one|bus|vehicle|streetcar)|another\s+(?:one|bus|vehicle|streetcar))\b/i.test(input);
+}
+
+function isOptionsFollowUp(input: string): boolean {
+  return /\b(?:more\s+options?|other\s+options?|any\s+other|alternatives?|alternate\s+(?:routes?|ways?)|other\s+ways?|different\s+routes?|what\s+else|something\s+else|choices?)\b/i.test(input);
 }
 
 function isWeatherQuestion(input: string): boolean {
@@ -281,6 +291,143 @@ function parseAssistantTargetTime(input: string): Date | undefined {
   }
 
   return undefined;
+}
+
+function parseRelativeTargetOffsetMinutes(input: string): number | undefined {
+  const text = input.toLowerCase();
+  const relative = text.match(/\b(?:in\s+)?(\d+|one|two|three|four|five|six)\s+(minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/);
+  const wordNumbers: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+  };
+
+  if (!relative) return undefined;
+
+  const amount = wordNumbers[relative[1]] ?? Number(relative[1]);
+  return relative[2].startsWith("hour") ? amount * 60 : amount;
+}
+
+function parseTransitClockMinutes(time: string): number | undefined {
+  const match = time.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return undefined;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return undefined;
+
+  return hours * 60 + minutes;
+}
+
+function formatTransitClockMinutes(minutes: number): string {
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const hours = Math.floor(normalized / 60);
+  const mins = normalized % 60;
+
+  return `${hours}:${String(mins).padStart(2, "0")}`;
+}
+
+function parseDurationMinutes(duration: string): number | undefined {
+  const match = duration.match(/\b(\d+)\s*(?:min|minute|minutes)\b/i);
+  if (!match) return undefined;
+
+  const minutes = Number(match[1]);
+  return Number.isFinite(minutes) ? minutes : undefined;
+}
+
+function calculateDestinationTiming(
+  input: string,
+  route: NavigationRoute,
+  context: TransitAssistantContext,
+): { etaMin: number; arrivalTime: string; timingNote?: string } {
+  if (isNextVehicleFollowUp(input)) {
+    const nextVehicleGap = route.alsoAt
+      .map(parseDurationMinutes)
+      .find((minutes): minutes is number => minutes !== undefined) ?? 30;
+    const currentEta = context.navigationEtaMin ?? route.etaMin;
+    const currentArrival = parseTransitClockMinutes(context.navigationArrivalTime ?? route.arrivalTime);
+
+    return {
+      etaMin: currentEta + nextVehicleGap,
+      arrivalTime: currentArrival !== undefined
+        ? formatTransitClockMinutes(currentArrival + nextVehicleGap)
+        : route.arrivalTime,
+      timingNote: `If you miss that vehicle, the next one is about ${nextVehicleGap} min later,`,
+    };
+  }
+
+  const targetTime = parseAssistantTargetTime(input);
+  if (!targetTime) {
+    return { etaMin: route.etaMin, arrivalTime: route.arrivalTime };
+  }
+
+  const relativeOffset = parseRelativeTargetOffsetMinutes(input);
+  const scheduledArrival = parseTransitClockMinutes(route.arrivalTime);
+
+  if (relativeOffset !== undefined && scheduledArrival !== undefined) {
+    return {
+      etaMin: route.etaMin + relativeOffset,
+      arrivalTime: formatTransitClockMinutes(scheduledArrival + relativeOffset),
+      timingNote: `Leaving ${relativeOffset} min later,`,
+    };
+  }
+
+  const scheduledDeparture = parseTransitClockMinutes(route.departureTime);
+  if (scheduledDeparture !== undefined && scheduledArrival !== undefined) {
+    const tripDuration = scheduledArrival >= scheduledDeparture
+      ? scheduledArrival - scheduledDeparture
+      : scheduledArrival + 1440 - scheduledDeparture;
+    const targetMinutes = targetTime.getHours() * 60 + targetTime.getMinutes();
+
+    return {
+      etaMin: Math.max(0, Math.round((targetTime.getTime() - Date.now()) / 60000)),
+      arrivalTime: formatTransitClockMinutes(targetMinutes + tripDuration),
+      timingNote: `Leaving around ${formatTransitTime(targetTime)},`,
+    };
+  }
+
+  return {
+    etaMin: Math.max(0, Math.round((targetTime.getTime() - Date.now()) / 60000)),
+    arrivalTime: formatTransitTime(targetTime),
+    timingNote: `Around ${formatTransitTime(targetTime)},`,
+  };
+}
+
+function buildDestinationOptionsAnswer(
+  route: NavigationRoute,
+  context: TransitAssistantContext,
+): { text: string; etaMin: number; arrivalTime: string } {
+  const baseEta = context.navigationEtaMin ?? route.etaMin;
+  const baseArrival = parseTransitClockMinutes(context.navigationArrivalTime ?? route.arrivalTime);
+  const optionGaps = [0, ...route.alsoAt.map(parseDurationMinutes)]
+    .filter((minutes): minutes is number => minutes !== undefined)
+    .filter((minutes, index, all) => all.indexOf(minutes) === index)
+    .slice(0, 4);
+
+  const options = optionGaps.map((gap) => {
+    const eta = baseEta + gap;
+    const arrival = baseArrival !== undefined
+      ? formatTransitClockMinutes(baseArrival + gap)
+      : route.arrivalTime;
+
+    return `about ${eta} min, arriving ${arrival}`;
+  });
+
+  const stopName = route.busStop.replace(/[.]+$/, "");
+  const transport = route.routeLabel.match(/^\d+/) ? "TTC transit" : "transit";
+
+  return {
+    etaMin: baseEta,
+    arrivalTime: baseArrival !== undefined ? formatTransitClockMinutes(baseArrival) : route.arrivalTime,
+    text: [
+      `Yes. For ${route.destName}, you can keep using ${transport} route ${route.routeLabel} from ${stopName}.`,
+      `Upcoming options are ${options.join("; ")}.`,
+      `They all ride ${route.totalStops} stops after the ${route.walkMin} min walk to the stop.`,
+    ].join(" "),
+  };
 }
 
 function estimateWeatherTransitDelay(weather: CurrentWeather): number {
@@ -469,17 +616,43 @@ async function answerDestinationQuestion(
   const route = await getNavigationRoute("current-location", destinationId);
   const stopName = route.busStop.replace(/[.]+$/, "");
   const transport = route.routeLabel.match(/^\d+/) ? "TTC transit" : "transit";
-  const nextContext = { ...context, destinationId };
+  if (isOptionsFollowUp(input)) {
+    const optionsAnswer = buildDestinationOptionsAnswer(route, context);
+    return {
+      matchedIntent: "navigation",
+      confidence: 82,
+      context: {
+        ...context,
+        destinationId,
+        navigationEtaMin: optionsAnswer.etaMin,
+        navigationArrivalTime: optionsAnswer.arrivalTime,
+        lastIntent: "navigation",
+      },
+      text: optionsAnswer.text,
+    };
+  }
+
+  const timing = calculateDestinationTiming(input, route, context);
+  const nextContext = {
+    ...context,
+    destinationId,
+    navigationEtaMin: timing.etaMin,
+    navigationArrivalTime: timing.arrivalTime,
+    lastIntent: "navigation" as const,
+  };
+  const intro = timing.timingNote
+    ? `${timing.timingNote} take ${transport} route ${route.routeLabel} to get to ${route.destName}.`
+    : `To get to ${route.destName}, take ${transport} route ${route.routeLabel}.`;
 
   return {
     matchedIntent: "navigation",
-    confidence: 86,
+    confidence: timing.timingNote ? 78 : 86,
     context: nextContext,
     text: [
-      `To get to ${route.destName}, take ${transport} route ${route.routeLabel}.`,
+      intro,
       `Walk ${route.walkMin} min (${route.walkMeters} m) to ${stopName} station/stop.`,
-      `The vehicle is estimated in ${route.etaMin} min, then ride ${route.totalStops} stops.`,
-      `Estimated arrival: ${route.arrivalTime}.`,
+      `The vehicle is estimated in ${timing.etaMin} min, then ride ${route.totalStops} stops.`,
+      `Estimated arrival: ${timing.arrivalTime}.`,
     ].join(" "),
   };
 }
