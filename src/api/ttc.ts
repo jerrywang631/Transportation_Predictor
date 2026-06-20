@@ -582,6 +582,17 @@ function buildDestinationOptionsAnswer(
   route: NavigationRoute,
   context: TransitAssistantContext,
 ): { text: string; etaMin: number; arrivalTime: string } {
+  if (route.available === false) {
+    return {
+      etaMin: 0,
+      arrivalTime: "",
+      text: buildNavigationTripText(route, {
+        etaMin: 0,
+        arrivalTime: "",
+      }).join(" "),
+    };
+  }
+
   const baseEta = context.navigationEtaMin ?? route.etaMin;
   const baseArrival = parseTransitClockMinutes(context.navigationArrivalTime ?? route.arrivalTime);
   const optionGaps = [0, ...route.alsoAt.map(parseDurationMinutes)]

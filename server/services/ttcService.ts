@@ -1553,7 +1553,7 @@ const getNavigationUnavailableRoute = (
 ): NavigationRoute => ({
   source: "otp",
   available: false,
-  message: "Navigation unavailable.",
+  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but live ${modeLabel(mode).toLowerCase()} routing is unavailable right now.`,
   originCoordinates,
   destinationCoordinates: { lat: dest.lat, lng: dest.lng },
   destName: dest.name,
@@ -1590,10 +1590,39 @@ export const getNavigationRoute = (
   return Promise.resolve(getMockNavigationRoute(dest, originCoordinates));
 };
 
+const isPlaceholderDestination = (dest: DestinationRecord) =>
+  dest.routeLabel === "Transit" &&
+  dest.walkMin === 0 &&
+  dest.walkMeters === 0 &&
+  dest.etaMin === 0 &&
+  !dest.arrivalTime &&
+  dest.totalStops === 0;
+
 const getMockNavigationRoute = (
   dest: DestinationRecord,
   originCoordinates?: { lat: number; lng: number },
 ): NavigationRoute => {
+  if (isPlaceholderDestination(dest)) {
+    return {
+      source: "mock",
+      available: false,
+      message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but I need your current location and live routing to calculate the trip.`,
+      ...(originCoordinates ? { originCoordinates } : {}),
+      destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+      destName: dest.name,
+      destAddress: dest.address,
+      walkMin: 0,
+      walkMeters: 0,
+      busStop: "",
+      routeLabel: "",
+      etaMin: 0,
+      departureTime: "",
+      arrivalTime: "",
+      totalStops: 0,
+      alsoAt: [],
+      legs: [],
+    };
+  }
 
   return {
     source: "mock",
