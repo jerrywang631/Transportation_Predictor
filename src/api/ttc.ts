@@ -215,8 +215,45 @@ function extractDestinationQuery(input: string): string | undefined {
   return undefined;
 }
 
+function extractStopQuery(input: string): string | undefined {
+  const cleaned = input.trim().replace(/[?.!]+$/, "");
+  const patterns = [
+    /\b(?:at|from|near|by)\s+(.+)$/i,
+    /\b(?:stop|station)\s+(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = cleaned.match(pattern);
+    if (match?.[1]) {
+      return match[1]
+        .replace(/\b(?:for|on|route|bus|streetcar|ttc|coming|arriving|arrive|eta|when|what|about|the|a|an)\b/gi, " ")
+        .replace(/\b[1-9]\d{1,2}\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+  }
+
+  return undefined;
+}
+
 function isDestinationFollowUp(input: string): boolean {
   return /\b(?:how\s+about|what\s+about|that\s+trip|the\s+trip|same\s+destination|there|destination|arrival|arrive|walk|ride|stops|directions?|navigate|miss|missed|next\s+(?:one|bus|vehicle|streetcar)|another\s+(?:one|bus|vehicle|streetcar)|more\s+options?|other\s+options?|any\s+other|alternatives?|alternate\s+(?:routes?|ways?)|other\s+ways?|different\s+routes?|what\s+else|something\s+else|choices?)\b/i.test(input);
+}
+
+function hasDestinationContext(context: TransitAssistantContext): boolean {
+  return Boolean(context.destinationId);
+}
+
+function hasRouteContext(context: TransitAssistantContext): boolean {
+  return Boolean(context.stopId || context.routeId || context.direction);
+}
+
+function hasAssistantContext(context: TransitAssistantContext): boolean {
+  return hasDestinationContext(context) || hasRouteContext(context) || Boolean(context.lastIntent);
+}
+
+function isGenericFollowUp(input: string): boolean {
+  return /\b(?:what\s+about|how\s+about|and\s+(?:now|then|later|there|that|this)|also|then|later|now|today|tomorrow|tonight|this evening|same|again|that|this|it|there|those|them|why|how\s+(?:long|late|far|bad|busy)|when|where|which|should\s+i|can\s+i|do\s+i|is\s+(?:it|that|there)|are\s+(?:there|they)|does\s+(?:it|that)|more\s+options?|other\s+options?|any\s+other|alternatives?|what\s+else|something\s+else|miss|missed|next\s+(?:one|bus|vehicle|streetcar))\b/i.test(input);
 }
 
 function isNextVehicleFollowUp(input: string): boolean {
@@ -233,6 +270,18 @@ function isWeatherQuestion(input: string): boolean {
 
 function isTrafficQuestion(input: string): boolean {
   return /\b(?:traffic|road|roads|congestion|jam|busy roads|rush hour)\b/i.test(input);
+}
+
+function isDelayQuestion(input: string): boolean {
+  return /\b(?:delay|late|slow|behind|accident|construction|why)\b/i.test(input);
+}
+
+function isEtaQuestion(input: string): boolean {
+  return /\b(?:bus|streetcar|vehicle|ttc|route|stop|station|eta|arriv|when|how\s+long|next\s+(?:one|bus|vehicle|streetcar)|miss|missed|\b\d{3}\b)\b/i.test(input);
+}
+
+function isCrowdingQuestion(input: string): boolean {
+  return /\b(?:crowd|busy|full|passenger|load|packed|space|seats?)\b/i.test(input);
 }
 
 function isTimeFollowUp(input: string): boolean {
@@ -675,12 +724,14 @@ async function pickAssistantPrediction(
   input: string,
   context: TransitAssistantContext,
 ): Promise<{ prediction: Prediction; context: TransitAssistantContext }> {
+  const followUpWithRouteContext = isGenericFollowUp(input) && hasRouteContext(context);
   const routeId = findRouteInText(input) ?? context.routeId;
   const directionFromText = findDirectionInText(input) ?? context.direction;
   let stopId = context.stopId;
 
   if (!stopId) {
-    const stops = await searchStops(routeId ? String(routeId) : input);
+    const stopQuery = extractStopQuery(input);
+    const stops = await searchStops(stopQuery || (routeId && followUpWithRouteContext ? String(routeId) : input));
     stopId = stops[0]?.id;
   }
 
@@ -723,22 +774,30 @@ export async function askTransitAssistant(
     };
   }
 
-  const destinationAnswer = await answerDestinationQuestion(q, context);
-  if (destinationAnswer) return destinationAnswer;
+  const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
+  const wantsWeather = isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp));
+  const wantsTraffic = isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp));
+  const wantsDelay = isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
+  const wantsCrowding = isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
+  const wantsEta = isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
 
-  if (isWeatherQuestion(q) || (context.lastIntent === "weather" && isTimeFollowUp(q))) {
+  if (wantsWeather) {
     return answerWeatherQuestion(q, context);
   }
 
-  if (isTrafficQuestion(q) || (context.lastIntent === "traffic" && isTimeFollowUp(q))) {
+  if (wantsTraffic && !wantsCrowding) {
     return answerTrafficQuestion(q, context);
   }
 
-  const isTransitQuestion = /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|crowd|busy|navigate|direction|trip|destination|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q);
+  const destinationAnswer = await answerDestinationQuestion(q, context);
+  if (destinationAnswer) return destinationAnswer;
+
+  const isTransitQuestion = /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|crowd|busy|navigate|direction|trip|destination|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
   if (!isTransitQuestion) {
     return {
       matchedIntent: "out-of-scope",
       confidence: 82,
+      context,
       text: "I can help with TTC trip questions like arrival times, nearby stops, route delays, traffic, weather, and navigation.",
     };
   }
@@ -748,42 +807,42 @@ export async function askTransitAssistant(
     const { confidence, summary } = describePrediction(prediction);
     const stopName = prediction.stopName.replace(/[.]+$/, "");
 
-    if (/weather|rain|snow|storm|wind|ice/i.test(q)) {
+    if (wantsWeather) {
       return {
         matchedIntent: "weather",
         confidence,
-        context: nextContext,
+        context: { ...nextContext, lastIntent: "weather" },
         text: prediction.offsets.weather > 0
           ? `Weather is adding about ${prediction.offsets.weather} min. Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}.`
           : `Weather is not adding delay right now. Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}.`,
       };
     }
 
-    if (/traffic|road|congestion/i.test(q)) {
+    if (wantsCrowding) {
+      return {
+        matchedIntent: "crowding",
+        confidence,
+        context: { ...nextContext, lastIntent: "crowding" },
+        text: "Crowding is not connected to a live data source yet, so I can only answer ETA, schedule, weather, traffic, accident, and construction factors for now.",
+      };
+    }
+
+    if (wantsTraffic) {
       return {
         matchedIntent: "traffic",
         confidence,
-        context: nextContext,
+        context: { ...nextContext, lastIntent: "traffic" },
         text: prediction.offsets.traffic > 0
           ? `Traffic is adding about ${prediction.offsets.traffic} min. Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}.`
           : `Traffic is not adding delay right now. Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}.`,
       };
     }
 
-    if (/crowd|busy|full|passenger|load/i.test(q)) {
-      return {
-        matchedIntent: "crowding",
-        confidence,
-        context: nextContext,
-        text: "Crowding is not connected to a live data source yet, so I can only answer ETA, schedule, weather, traffic, accident, and construction factors for now.",
-      };
-    }
-
-    if (/delay|late|slow|behind|accident|construction/i.test(q)) {
+    if (wantsDelay) {
       return {
         matchedIntent: "delay",
         confidence,
-        context: nextContext,
+        context: { ...nextContext, lastIntent: "delay" },
         text: `Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}. Main factors: ${summary}. Confidence: ${confidence}%.`,
       };
     }
@@ -791,7 +850,7 @@ export async function askTransitAssistant(
     return {
       matchedIntent: "eta",
       confidence,
-      context: nextContext,
+      context: { ...nextContext, lastIntent: "eta" },
       text: `Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}. ${summary}. Confidence: ${confidence}%.`,
     };
   } catch {
