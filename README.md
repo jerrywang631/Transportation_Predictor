@@ -69,9 +69,12 @@ GTFS_DB_PATH=./data/gtfs.sqlite
 OTP_BASE_URL=http://localhost:8080
 OTP_PLAN_DATETIME=match-weekday
 OTP_GTFS_SERVICE_START_DATE=2026-06-21
+TICKETMASTER_API_KEY=optional_ticketmaster_discovery_api_key
 ```
 
 `OTP_PLAN_DATETIME=match-weekday` maps the current clock time to the same weekday inside the GTFS feed calendar. This avoids failed transit searches when today's real date is outside the downloaded TTC feed's service dates.
+
+`TICKETMASTER_API_KEY` enables live Toronto sports, concert, festival, and entertainment event lookups through the Ticketmaster Discovery API. If it is not set, the app falls back to local major-venue pressure estimates for Toronto.
 
 Restart `npm run server` after changing `.env`.
 

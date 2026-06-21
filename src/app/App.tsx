@@ -286,6 +286,10 @@ import {
   getConstructionImpact,
   type ConstructionImpact,
 } from "@/api/construction";
+import {
+  getEventImpact,
+  type EventImpact,
+} from "@/api/events";
 
 function estimateWeatherDelay(weather: CurrentWeather): number {
   const condition = weather.condition.toLowerCase();
@@ -335,6 +339,19 @@ function describeConstructionDelay(impact: ConstructionImpact) {
   }
 
   return `${event.title}. ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
+}
+
+function describeEventDelay(impact: EventImpact) {
+  const event = impact.events[0];
+  const source = impact.source === "ticketmaster" ? "Ticketmaster event data" : "Toronto venue pressure estimate";
+
+  if (!event) {
+    return impact.source === "ticketmaster"
+      ? "No nearby sports games, concerts, or major entertainment events are showing in the event feed for this trip window."
+      : "No major Toronto venue pressure is expected for this trip window.";
+  }
+
+  return `${source}: ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
 }
 
 function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
@@ -598,6 +615,7 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const [weather, setWeather] = useState<CurrentWeather | null>(null);
   const [trafficImpact, setTrafficImpact] = useState<TrafficImpact | null>(null);
   const [constructionImpact, setConstructionImpact] = useState<ConstructionImpact | null>(null);
+  const [eventImpact, setEventImpact] = useState<EventImpact | null>(null);
 
   // Bootstrap: load stop metadata, pick defaults, then fetch first prediction
   useEffect(() => {
@@ -657,10 +675,12 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
     Promise.all([
       getTrafficImpact(mapCenter[0], mapCenter[1], selectedRoute).catch(() => null),
       getConstructionImpact(mapCenter[0], mapCenter[1]).catch(() => null),
-    ]).then(([nextTrafficImpact, nextConstructionImpact]) => {
+      getEventImpact(mapCenter[0], mapCenter[1], selectedRoute).catch(() => null),
+    ]).then(([nextTrafficImpact, nextConstructionImpact, nextEventImpact]) => {
       if (cancelled) return;
       setTrafficImpact(nextTrafficImpact);
       setConstructionImpact(nextConstructionImpact);
+      setEventImpact(nextEventImpact);
     });
 
     return () => { cancelled = true; };
@@ -672,15 +692,18 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const trafficDelay = trafficImpact?.trafficDelayMin ?? prediction?.offsets.traffic;
   const accidentDelay = trafficImpact?.accidentDelayMin ?? prediction?.offsets.accidents;
   const constructionDelay = constructionImpact?.constructionDelayMin ?? trafficImpact?.constructionDelayMin ?? prediction?.offsets.construction;
+  const eventDelay = eventImpact?.eventDelayMin ?? prediction?.offsets.events ?? 0;
   const displayedPrediction = prediction && weatherDelay !== undefined
     ? {
       ...prediction,
+      etaMin: prediction.etaMin + eventDelay,
       offsets: {
         ...prediction.offsets,
         weather: weatherDelay,
         traffic: trafficDelay ?? prediction.offsets.traffic,
         accidents: accidentDelay ?? prediction.offsets.accidents,
         construction: constructionDelay ?? prediction.offsets.construction,
+        events: eventDelay,
       },
     }
     : prediction;
@@ -800,7 +823,7 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
                 <div className="flex justify-between mb-3">
                   <OffsetItem icon={<WalkIcon />}          value={displayedPrediction.offsets.accidents}    label="accidents" />
                   <OffsetItem icon={<ConstructionIcon />}  value={displayedPrediction.offsets.construction} label="construction" />
-                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.other}        label="other" />
+                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.events ?? 0}  label="events" />
                 </div>
                 <button
                   onClick={() => selectedRoute !== null && dir !== null && onOpenReport(selectedRoute, dir)}
@@ -838,8 +861,9 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
       getCurrentWeather(mapCenter[0], mapCenter[1]).catch(() => null),
       getTrafficImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
       getConstructionImpact(mapCenter[0], mapCenter[1]).catch(() => null),
+      getEventImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
     ])
-      .then(([report, currentWeather, trafficImpact, constructionImpact]) => {
+      .then(([report, currentWeather, trafficImpact, constructionImpact, eventImpact]) => {
         if (cancelled) return;
 
         const nextReport: BusReportData = {
@@ -879,6 +903,14 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
           };
         }
 
+        if (eventImpact) {
+          nextReport.etaMin += eventImpact.eventDelayMin;
+          nextReport.factors.events = {
+            value: eventImpact.eventDelayMin,
+            description: describeEventDelay(eventImpact),
+          };
+        }
+
         nextReport.confidence = estimateConfidenceFromFactors(nextReport.factors);
         setData(nextReport);
         setLoading(false);
@@ -892,7 +924,7 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
 
   const iconMap: Record<string, React.ReactNode> = {
     schedule: <BusIcon />, weather: <CloudIcon />, traffic: <TrafficIcon />,
-    accidents: <WalkIcon />, construction: <ConstructionIcon />, other: <StarIcon />,
+    accidents: <WalkIcon />, construction: <ConstructionIcon />, events: <StarIcon />, other: <StarIcon />,
   };
 
   return (

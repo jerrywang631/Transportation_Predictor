@@ -3,6 +3,7 @@ import "dotenv/config";
 import express from "express";
 
 import constructionRouter from "./routes/construction";
+import eventsRouter from "./routes/events";
 import ttcRouter from "./routes/ttc";
 import trafficRouter from "./routes/traffic";
 import weatherRouter from "./routes/weather";
@@ -21,6 +22,7 @@ app.use("/api/weather", weatherRouter);
 app.use("/api/ttc", ttcRouter);
 app.use("/api/traffic", trafficRouter);
 app.use("/api/construction", constructionRouter);
+app.use("/api/events", eventsRouter);
 
 app.use(
   (

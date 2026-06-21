@@ -1,5 +1,6 @@
 import { apiRequest } from "./request";
 import { getTrafficImpact } from "./traffic";
+import { getEventImpact, type EventImpact } from "./events";
 import {
   getCurrentWeather,
   getWeatherForecast,
@@ -55,6 +56,7 @@ export interface Prediction {
     passengerLoad?: number;
     accidents: number;
     construction: number;
+    events?: number;
     other: number;
   };
   summary?: string;
@@ -78,6 +80,7 @@ export interface BusReport {
     passengerLoad?: { value: number; description: string };
     accidents: { value: number; description: string };
     construction: { value: number; description: string };
+    events?: { value: number; description: string };
     other?: { value: number; description: string };
   };
 }
@@ -153,7 +156,7 @@ export interface TransitAssistantContext {
 
 export interface TransitAssistantAnswer {
   text: string;
-  matchedIntent: "eta" | "delay" | "weather" | "traffic" | "crowding" | "navigation" | "help" | "out-of-scope";
+  matchedIntent: "eta" | "delay" | "weather" | "traffic" | "events" | "crowding" | "navigation" | "help" | "out-of-scope";
   confidence: number;
   context?: TransitAssistantContext;
 }
@@ -406,6 +409,10 @@ function isWeatherQuestion(input: string): boolean {
 
 function isTrafficQuestion(input: string): boolean {
   return /\b(?:traffic|road|roads|congestion|jam|busy roads|rush hour)\b/i.test(input);
+}
+
+function isEventQuestion(input: string): boolean {
+  return /\b(?:event|events|game|games|match|concert|show|festival|arena|stadium|rogers\s+centre|scotiabank\s+arena|bmo\s+field|budweiser\s+stage|entertainment|venue|crowds?)\b/i.test(input);
 }
 
 function isDelayQuestion(input: string): boolean {
@@ -737,6 +744,25 @@ function describeTrafficLevel(delayMin: number): string {
   return "light";
 }
 
+function describeEventImpact(impact: EventImpact, targetTime?: Date): string {
+  const when = targetTime ? `around ${formatTransitTime(targetTime)}` : "right now";
+  const source = impact.source === "ticketmaster" ? "Ticketmaster" : "major Toronto venue estimates";
+
+  if (impact.events.length === 0) {
+    return `I do not see nearby sports games, concerts, festivals, or large entertainment events affecting TTC arrivals ${when}. Source: ${source}.`;
+  }
+
+  const eventText = impact.events
+    .slice(0, 3)
+    .map(event => `${event.title} at ${event.venueName} (${event.distanceKm.toFixed(1)} km away, about +${event.delayMin} min)`)
+    .join("; ");
+  const delayText = impact.eventDelayMin > 0
+    ? `Large-event crowds may add about ${impact.eventDelayMin} min near the route.`
+    : "Those events should not add TTC delay.";
+
+  return `${when}, ${delayText} Source: ${source}. Events: ${eventText}.`;
+}
+
 function formatLegMode(mode: NavigationLeg["mode"]): string {
   if (mode === "BUS") return "bus";
   if (mode === "STREETCAR") return "streetcar";
@@ -871,6 +897,34 @@ async function answerTrafficQuestion(input: string, context: TransitAssistantCon
       confidence: 55,
       context: { ...context, lastIntent: "traffic" },
       text: "I cannot estimate traffic right now. Try again in a moment.",
+    };
+  }
+}
+
+async function answerEventQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
+  const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
+  const routeId = findRouteInText(input) ?? context.routeId ?? 501;
+
+  try {
+    const impact = await getEventImpact(43.6532, -79.3832, routeId, targetTime?.toISOString());
+
+    return {
+      matchedIntent: "events",
+      confidence: impact.source === "ticketmaster" ? 84 : 72,
+      context: {
+        ...context,
+        routeId,
+        lastTargetTimeIso: targetTime?.toISOString() ?? new Date().toISOString(),
+        lastIntent: "events",
+      },
+      text: describeEventImpact(impact, targetTime),
+    };
+  } catch {
+    return {
+      matchedIntent: "events",
+      confidence: 55,
+      context: { ...context, lastIntent: "events" },
+      text: "I cannot check Toronto event pressure right now. Try again in a moment.",
     };
   }
 }
@@ -1178,6 +1232,7 @@ function describePrediction(prediction: Prediction) {
     prediction.offsets.schedule ? `schedule ${prediction.offsets.schedule > 0 ? "adds" : "saves"} ${Math.abs(prediction.offsets.schedule)} min` : "",
     prediction.offsets.weather ? `weather adds ${prediction.offsets.weather} min` : "",
     prediction.offsets.traffic ? `traffic adds ${prediction.offsets.traffic} min` : "",
+    prediction.offsets.events ? `events add ${prediction.offsets.events} min` : "",
   ].filter(Boolean).join("; ");
 
   return {
@@ -1274,7 +1329,7 @@ export async function askTransitAssistant(
     return {
       matchedIntent: "help",
       confidence: 90,
-      text: 'Ask me about a TTC route, stop, ETA, delay, traffic, weather, or destination. For example: "When is the 501 coming at College?"',
+      text: 'Ask me about a TTC route, stop, ETA, delay, traffic, weather, events, or destination. For example: "When is the 501 coming at College?"',
     };
   }
 
@@ -1294,6 +1349,7 @@ export async function askTransitAssistant(
   const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
   const wantsWeather = isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp));
   const wantsTraffic = isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp));
+  const wantsEvents = isEventQuestion(q) || (context.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
   const wantsDelay = isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
   const wantsCrowding = isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
   const wantsEta = isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
@@ -1309,16 +1365,20 @@ export async function askTransitAssistant(
     return answerTrafficQuestion(q, context);
   }
 
+  if (wantsEvents && !wantsCrowding) {
+    return answerEventQuestion(q, context);
+  }
+
   const destinationAnswer = await answerDestinationQuestion(q, context);
   if (destinationAnswer) return destinationAnswer;
 
-  const isTransitQuestion = /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|crowd|busy|navigate|direction|trip|destination|terminal|terminus|last stop|final stop|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
+  const isTransitQuestion = /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|event|game|concert|show|festival|crowd|busy|navigate|direction|trip|destination|terminal|terminus|last stop|final stop|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
   if (!isTransitQuestion) {
     return {
       matchedIntent: "out-of-scope",
       confidence: 82,
       context,
-      text: "I can help with TTC trip questions like arrival times, nearby stops, route delays, traffic, weather, and navigation.",
+      text: "I can help with TTC trip questions like arrival times, nearby stops, route delays, traffic, weather, events, and navigation.",
     };
   }
 
@@ -1391,11 +1451,15 @@ export async function askTransitAssistant(
     }
 
     if (wantsDelay) {
+      const eventImpact = await getEventImpact(43.6532, -79.3832, prediction.routeId).catch(() => null);
+      const eventText = eventImpact && eventImpact.eventDelayMin > 0
+        ? `; events add ${eventImpact.eventDelayMin} min (${eventImpact.events[0]?.title ?? "large Toronto event activity"})`
+        : "";
       return {
         matchedIntent: "delay",
         confidence,
         context: { ...nextContext, lastIntent: "delay" },
-        text: `Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}. Main factors: ${summary}. Confidence: ${confidence}%.`,
+        text: `Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin + (eventImpact?.eventDelayMin ?? 0)} min at ${stopName}. Main factors: ${summary}${eventText}. Confidence: ${confidence}%.`,
       };
     }
 
