@@ -1912,6 +1912,10 @@ function AiChatbot({ appContext }: { appContext?: TransitAssistantContext }) {
                     {[
                       ["Arrivals", "When is the 501 at Spadina?"],
                       ["Delays", "Why is my route slow?"],
+                      ["Traffic", "Traffic near Union"],
+                      ["Crowding", "Is the 501 crowded?"],
+                      ["Events", "Events around me"],
+                      ["Holidays", "Any holiday impact today?"],
                       ["Navigation", "How do I get to CN Tower?"],
                       ["Recommendation", "Restaurants near Union"],
                       ["Guide", "Plan a half-day in Toronto"],
