@@ -514,6 +514,51 @@ function parseAssistantTargetTime(input: string, baseTime = new Date()): Date | 
   return undefined;
 }
 
+function getObservedHolidayDate(year: number, monthIndex: number, matcher: (date: Date) => boolean): Date {
+  const date = new Date(year, monthIndex, 1, 12, 0, 0, 0);
+  while (!matcher(date)) {
+    date.setDate(date.getDate() + 1);
+  }
+  return date;
+}
+
+function parseNamedHolidayTargetDate(input: string, baseTime = new Date()): Date | undefined {
+  const text = input.toLowerCase();
+  const year = baseTime.getFullYear();
+  const fixedDate = (monthIndex: number, day: number) => new Date(year, monthIndex, day, 12, 0, 0, 0);
+
+  if (/\bcanada day\b/.test(text)) return fixedDate(6, 1);
+  if (/\bchristmas\b/.test(text)) return fixedDate(11, 25);
+  if (/\bboxing day\b/.test(text)) return fixedDate(11, 26);
+  if (/\bnew year'?s?(?: day)?\b/.test(text)) return fixedDate(0, 1);
+  if (/\bfamily day\b/.test(text)) {
+    let mondayCount = 0;
+    return getObservedHolidayDate(year, 1, date => {
+      if (date.getDay() !== 1) return false;
+      mondayCount += 1;
+      return mondayCount === 3;
+    });
+  }
+  if (/\bvictoria day\b/.test(text)) {
+    const date = new Date(year, 4, 24, 12, 0, 0, 0);
+    while (date.getDay() !== 1) date.setDate(date.getDate() - 1);
+    return date;
+  }
+  if (/\blabou?r day\b/.test(text)) {
+    return getObservedHolidayDate(year, 8, date => date.getDay() === 1);
+  }
+  if (/\bthanksgiving\b/.test(text)) {
+    let mondayCount = 0;
+    return getObservedHolidayDate(year, 9, date => {
+      if (date.getDay() !== 1) return false;
+      mondayCount += 1;
+      return mondayCount === 2;
+    });
+  }
+
+  return undefined;
+}
+
 function parseRelativeTargetOffsetMinutes(input: string): number | undefined {
   const text = input.toLowerCase();
   const relative = text.match(/\b(?:in\s+)?(?:another\s+)?(\d+|one|two|three|four|five|six)\s+(?:more\s+)?(minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/);
@@ -957,7 +1002,8 @@ async function answerEventQuestion(input: string, context: TransitAssistantConte
 }
 
 async function answerHolidayQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
-  const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
+  const timeBase = getTimeBase(input, context);
+  const targetTime = parseNamedHolidayTargetDate(input, timeBase) ?? parseAssistantTargetTime(input, timeBase);
 
   try {
     const impact = await getHolidayImpact(targetTime?.toISOString());
