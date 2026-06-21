@@ -346,16 +346,29 @@ function extractDestinationQuery(input: string): string | undefined {
   const cleaned = input.trim().replace(/[?.!]+$/, "");
   const patterns = [
     /\b(?:i\s+(?:want|need|would\s+like)\s+to\s+(?:go|travel|get)\s+to|can\s+you\s+(?:take|get|route|navigate)\s+me\s+to|take\s+me\s+to|get\s+me\s+to|route\s+me\s+to|navigate\s+me\s+to|go\s+to|travel\s+to|head\s+to|visit)\s+(.+)$/i,
-    /\b(?:how\s+(?:do|can|should)\s+i\s+(?:get|go|travel)\s+to|how\s+to\s+(?:get|go|travel)\s+to|directions?\s+to|navigate\s+to|route\s+to|trip\s+to|transit\s+to|plan\s+(?:a\s+)?trip\s+to)\s+(.+)$/i,
+    /\b(?:how\s+(?:do|can|should)\s+i\s+(?:get|go|travel)\s+to|how\s+to\s+(?:get|go|travel)\s+to|directions?\s+to|navigate\s+to|route\s+to|trip\s+to|transit\s+to|plan\s+(?:me\s+)?(?:a\s+)?trip\s+to)\s+(.+)$/i,
     /\b(?:what(?:'s|\s+is)?\s+the\s+(?:best\s+)?(?:route|way|trip)\s+to|give\s+me\s+(?:a\s+)?(?:route|trip|directions?)\s+to)\s+(.+)$/i,
   ];
 
   for (const pattern of patterns) {
     const match = cleaned.match(pattern);
-    if (match?.[1]) return match[1].trim();
+    if (match?.[1]) return cleanDestinationQuery(match[1]);
   }
 
   return undefined;
+}
+
+function cleanDestinationQuery(input: string): string {
+  return input
+    .trim()
+    .replace(/\s+\bfor\s+(?:today|tomorrow|tonight|this evening|later|(?:\d+|one|two|three|four|five|six)\s+(?:minute|minutes|hour|hours)\s*(?:later|from now)?|(?:at|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?).*/i, "")
+    .replace(/\s+\b(?:today|tomorrow|tonight|this evening)\s*(?:at|around)?\s*\d{0,2}:?\d{0,2}\s*(?:am|pm)?$/i, "")
+    .trim();
+}
+
+function isNavigationQuestion(input: string): boolean {
+  return extractDestinationQuery(input) !== undefined ||
+    /\b(?:navigate|navigation|directions?|route\s+me|take\s+me|get\s+me|go\s+to|get\s+to|travel\s+to|trip\s+to|plan\s+(?:me\s+)?(?:a\s+)?trip\s+to)\b/i.test(input);
 }
 
 function isBareDestinationCandidate(input: string): boolean {
@@ -535,7 +548,37 @@ function isHolidayQuestion(input: string): boolean {
 }
 
 function isGreeting(input: string): boolean {
-  return /^(?:hi|hello|hey|good morning|good afternoon|good evening|happy holidays|greetings)\b[!. ]*$/i.test(input.trim());
+  const normalized = input
+    .trim()
+    .toLowerCase()
+    .replace(/[!?.。,，]+/g, " ")
+    .replace(/\s+/g, " ");
+
+  if (!normalized || normalized.length > 80) return false;
+
+  return /^(?:hi|hello|hey|heya|hiya|yo|howdy|greetings|good day|good morning|good afternoon|good evening|good night|morning|afternoon|evening|happy holidays|what's up|whats up|sup|bonjour|hola|ciao|namaste|salaam|shalom|ni hao|你好|嗨|哈喽|早上好|下午好|晚上好)(?:\s+(?:there|again|friend|buddy|everyone|everybody|all|bot|assistant))*$/.test(normalized);
+}
+
+function answerGreeting(input: string, context: TransitAssistantContext): TransitAssistantAnswer {
+  const normalized = input.trim().toLowerCase();
+  let greeting = "Hello";
+
+  if (/\b(?:good morning|morning)\b|早上好/.test(normalized)) {
+    greeting = "Good morning";
+  } else if (/\b(?:good afternoon|afternoon)\b|下午好/.test(normalized)) {
+    greeting = "Good afternoon";
+  } else if (/\b(?:good evening|evening)\b|晚上好/.test(normalized)) {
+    greeting = "Good evening";
+  } else if (/\b(?:good night)\b/.test(normalized)) {
+    greeting = "Good night";
+  }
+
+  return {
+    matchedIntent: "help",
+    confidence: 95,
+    context: { ...context, lastIntent: "help" },
+    text: `${greeting}! I can help with TTC arrivals, nearby stops, delays, traffic, weather, events, holidays, and navigation.`,
+  };
 }
 
 function isDelayQuestion(input: string): boolean {
@@ -1574,6 +1617,7 @@ async function buildTransitAssistantAnswer(
   if (isGreeting(q)) {
     const holidayGreeting = await answerHolidayGreeting(context);
     if (holidayGreeting) return holidayGreeting;
+    return answerGreeting(q, context);
   }
 
   const unknownRouteAnswer = await answerUnknownRouteClarification(q, context);
@@ -1593,11 +1637,17 @@ async function buildTransitAssistantAnswer(
     return answerCurrentTimeQuestion(context);
   }
 
+  const explicitNavigationQuestion = isNavigationQuestion(q);
+  if (explicitNavigationQuestion) {
+    const destinationAnswer = await answerDestinationQuestion(q, context);
+    if (destinationAnswer) return destinationAnswer;
+  }
+
   const classifiedIntent = await classifyTransitAssistantIntent(q, context);
   const llmIntent = classifiedIntent?.intent;
   const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
   const wantsEvents = isEventQuestion(q) || llmIntent === "events" || (context.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
-  const wantsHolidays = isHolidayQuestion(q) || llmIntent === "holidays" || (context.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp));
+  const wantsHolidays = !explicitNavigationQuestion && (isHolidayQuestion(q) || llmIntent === "holidays" || (context.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp)));
   const wantsWeather = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "weather" : isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp)));
   const wantsTraffic = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "traffic" : isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp)));
   const wantsDelay = llmIntent ? llmIntent === "delay" : isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
