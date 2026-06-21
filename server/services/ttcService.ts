@@ -1585,6 +1585,7 @@ const getOtpNavigationRoute = async (
         destination: { label: "Destination", location: { coordinate: { latitude: $destLat, longitude: $destLng } } }
         ${dateTimeArgument}
         modes: { ${modesByMode[mode]} }
+        searchWindow: 7200
         first: 1
       ) {
         routingErrors { code description }
