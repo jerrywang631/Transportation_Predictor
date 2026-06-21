@@ -46,7 +46,7 @@ export interface Prediction {
   trafficDescription?: string;
   passengerLoadLevel?: "low" | "normal" | "busy" | "crowded";
   passengerLoadDescription?: string;
-  dirs: [string, string];
+  dirs: string[];
   routes: number[];
   offsets: {
     schedule: number;
@@ -131,7 +131,7 @@ export interface StopMeta {
   id: string;
   name: string;
   routes: number[];
-  dirs: [string, string];
+  dirs: string[];
   pos: [number, number];
 }
 
