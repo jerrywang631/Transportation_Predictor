@@ -7,6 +7,7 @@ export type TransitAssistantIntent =
   | "holidays"
   | "crowding"
   | "navigation"
+  | "guide"
   | "help"
   | "out-of-scope";
 
@@ -48,6 +49,7 @@ const VALID_INTENTS = new Set<TransitAssistantIntent>([
   "holidays",
   "crowding",
   "navigation",
+  "guide",
   "help",
   "out-of-scope",
 ]);
@@ -181,7 +183,7 @@ export async function classifyTransitAssistantIntent(
 ): Promise<TransitAssistantIntentResult> {
   const prompt = [
     "Classify this TTC transit assistant user message into exactly one intent.",
-    "Return only JSON with this schema: {\"intent\":\"eta|delay|weather|traffic|events|holidays|crowding|navigation|help|out-of-scope\",\"confidence\":0-100,\"reason\":\"short\"}.",
+    "Return only JSON with this schema: {\"intent\":\"eta|delay|weather|traffic|events|holidays|crowding|navigation|guide|help|out-of-scope\",\"confidence\":0-100,\"reason\":\"short\"}.",
     "Intent meanings:",
     "- eta: arrival time, next bus/streetcar, route/stop timing.",
     "- delay: lateness, causes, accidents, construction, why slow.",
@@ -191,6 +193,7 @@ export async function classifyTransitAssistantIntent(
     "- holidays: public holidays, statutory holidays, long weekends, holiday greetings.",
     "- crowding: passenger load, seats, packed vehicles.",
     "- navigation: directions, trip planning, how to get to a destination, including messages like 'plan a trip tomorrow to CN Tower' or 'I want to go to Union at 8'.",
+    "- guide: broad travel guide, itinerary, tourism, food, restaurants, attractions, shopping, parks, date ideas, family plans, rainy-day plans, or Toronto recommendations.",
     "- help: transit-related but missing needed details or clarification.",
     "- out-of-scope: not about TTC transit, commuting, routing, stops, traffic, weather, events, holidays, or crowding.",
     "Use context for follow-ups like 'what about now' or 'why'.",
@@ -232,6 +235,7 @@ export async function verifyTransitAssistantAnswer(
   const prompt = [
     "You are checking the final answer for Milk bot, a TTC transit assistant.",
     "Decide whether the draft answer correctly answers the user and is consistent with the provided context.",
+    "Milk bot can also answer Toronto guide and itinerary questions when they are useful for local travel planning.",
     "If the draft is correct, return it unchanged.",
     "If the draft is irrelevant, misleading, contradictory, or fails to answer a simple question, rewrite it.",
     "Do not invent precise TTC arrivals, routes, stops, weather, traffic, events, or holidays that are not present in the draft/context.",

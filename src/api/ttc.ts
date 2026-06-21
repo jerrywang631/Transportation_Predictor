@@ -155,6 +155,11 @@ export interface TransitAssistantContext {
   pendingSuggestedRoute?: number;
   lastTargetTimeIso?: string;
   lastIntent?: TransitAssistantAnswer["matchedIntent"];
+  guideArea?: string;
+  guideDuration?: string;
+  guideAudience?: string;
+  guideBudget?: string;
+  guideTopic?: string;
 }
 
 export type TransitAssistantIntent =
@@ -166,6 +171,7 @@ export type TransitAssistantIntent =
   | "holidays"
   | "crowding"
   | "navigation"
+  | "guide"
   | "help"
   | "out-of-scope";
 
@@ -208,6 +214,35 @@ const ROUTE_TERMINALS: Record<number, { label: string; terminals: string[]; note
     notes: "I cannot confirm individual short turns right now.",
   },
 };
+
+type GuideCategory = "attractions" | "food" | "parks" | "shopping" | "culture" | "night";
+type GuidePlace = {
+  name: string;
+  category: GuideCategory;
+  area: string;
+  address: string;
+  bestFor: string[];
+  note: string;
+  indoor?: boolean;
+  budget?: "free" | "low" | "medium" | "higher";
+  destinationQuery: string;
+};
+
+const GUIDE_PLACES: GuidePlace[] = [
+  { name: "CN Tower", category: "attractions", area: "downtown", address: "290 Bremner Blvd", bestFor: ["first time", "views", "photos"], note: "best paired with the waterfront or Ripley's Aquarium", indoor: true, budget: "higher", destinationQuery: "CN Tower" },
+  { name: "Ripley's Aquarium of Canada", category: "attractions", area: "downtown", address: "288 Bremner Blvd", bestFor: ["kids", "rain", "first time"], note: "strong indoor stop near CN Tower", indoor: true, budget: "higher", destinationQuery: "Ripley's Aquarium of Canada" },
+  { name: "St. Lawrence Market", category: "food", area: "east downtown", address: "93 Front St E", bestFor: ["food", "casual", "local"], note: "good for lunch and quick tasting stops", indoor: true, budget: "medium", destinationQuery: "St. Lawrence Market" },
+  { name: "Kensington Market", category: "food", area: "west downtown", address: "Kensington Ave", bestFor: ["food", "walking", "budget"], note: "good for casual food, vintage shops, and street wandering", budget: "low", destinationQuery: "Kensington Market" },
+  { name: "Chinatown", category: "food", area: "west downtown", address: "Spadina Ave", bestFor: ["food", "budget", "late"], note: "pairs naturally with Kensington Market and AGO", budget: "low", destinationQuery: "Chinatown Toronto" },
+  { name: "Art Gallery of Ontario", category: "culture", area: "west downtown", address: "317 Dundas St W", bestFor: ["art", "rain", "culture"], note: "good indoor culture stop near Chinatown", indoor: true, budget: "medium", destinationQuery: "Art Gallery of Ontario" },
+  { name: "Royal Ontario Museum", category: "culture", area: "midtown", address: "100 Queens Park", bestFor: ["kids", "rain", "museum"], note: "large museum option near Bloor-Yonge and University of Toronto", indoor: true, budget: "medium", destinationQuery: "Royal Ontario Museum" },
+  { name: "Toronto Islands Ferry", category: "parks", area: "waterfront", address: "Jack Layton Ferry Terminal", bestFor: ["views", "walking", "summer"], note: "best in good weather; allow extra time for ferry lines", budget: "low", destinationQuery: "Toronto Islands Ferry" },
+  { name: "High Park", category: "parks", area: "west end", address: "1873 Bloor St W", bestFor: ["nature", "walking", "free"], note: "large park with easy subway access", budget: "free", destinationQuery: "High Park" },
+  { name: "Trinity Bellwoods Park", category: "parks", area: "west downtown", address: "790 Queen St W", bestFor: ["local", "walking", "free"], note: "pairs well with Queen West shops and food", budget: "free", destinationQuery: "Trinity Bellwoods Park" },
+  { name: "CF Toronto Eaton Centre", category: "shopping", area: "downtown", address: "220 Yonge St", bestFor: ["shopping", "rain", "central"], note: "central indoor shopping near Dundas and Queen", indoor: true, budget: "medium", destinationQuery: "CF Toronto Eaton Centre" },
+  { name: "Yorkville Village", category: "shopping", area: "midtown", address: "55 Avenue Rd", bestFor: ["shopping", "upscale", "cafes"], note: "good for a quieter upscale stop near ROM", indoor: true, budget: "higher", destinationQuery: "Yorkville Village" },
+  { name: "Queen West", category: "night", area: "west downtown", address: "Queen St W", bestFor: ["night", "food", "shopping"], note: "good evening area for restaurants, bars, and local shops", budget: "medium", destinationQuery: "Queen West Toronto" },
+];
 
 export function getStopMeta(stopId: string): Promise<StopMeta> {
   return apiRequest<StopMeta>(`/api/ttc/stops/${encodeURIComponent(stopId)}`);
@@ -523,6 +558,14 @@ function isGenericFollowUp(input: string): boolean {
   return /\b(?:what\s+about|how\s+about|and\s+(?:now|then|later|there|that|this)|also|then|later|now|today|tomorrow|tonight|this evening|same|again|that|this|it|there|those|them|why|how\s+(?:long|late|far|bad|busy)|when|where|which|should\s+i|can\s+i|do\s+i|is\s+(?:it|that|there)|are\s+(?:there|they)|does\s+(?:it|that)|more\s+options?|other\s+options?|any\s+other|alternatives?|what\s+else|something\s+else|miss|missed|next\s+(?:one|bus|vehicle|streetcar))\b/i.test(input);
 }
 
+function isGuideFollowUp(input: string, context: TransitAssistantContext): boolean {
+  return context.lastIntent === "guide" && (
+    isGenericFollowUp(input) ||
+    /\b(?:more|another|different|nearby|closer|cheaper|free|indoor|outdoor|rainy|kids|family|date|food|restaurant|shopping|museum|park|night|morning|afternoon|evening|half\s+day|one\s+day|shorter|longer)\b/i.test(input) ||
+    /(?:更多|换一个|附近|近一点|便宜|免费|室内|室外|下雨|亲子|情侣|吃|餐厅|购物|博物馆|公园|晚上|上午|下午|半日|一天)/i.test(input)
+  );
+}
+
 function isLocationQuestion(input: string): boolean {
   return /\b(?:where\s+am\s+i|where\s+are\s+we|my\s+location|current\s+location|where\s+is\s+my\s+location|am\s+i\s+near)\b/i.test(input);
 }
@@ -553,6 +596,11 @@ function isEventQuestion(input: string): boolean {
 
 function isHolidayQuestion(input: string): boolean {
   return /\b(?:holiday|holidays|public holiday|stat holiday|statutory holiday|long weekend|canada day|christmas|boxing day|new year|thanksgiving|family day|victoria day|labou?r day)\b/i.test(input);
+}
+
+function isGuideQuestion(input: string): boolean {
+  return /\b(?:guide|itinerary|recommend|recommendation|suggest|where\s+should\s+i\s+go|what\s+should\s+i\s+do|things?\s+to\s+do|places?\s+to\s+(?:go|visit|eat|see)|tourist|sightseeing|attractions?|restaurants?|food|eat|lunch|dinner|cafe|coffee|date|family|kids|rainy|rain\s+day|budget|cheap|free|half\s+day|one\s+day|day\s+trip|plan\s+my\s+day)\b/i.test(input) ||
+    /(?:攻略|行程|推荐|去哪|哪里玩|玩什么|吃什么|餐厅|景点|一日游|半日|亲子|情侣|下雨|预算|便宜|免费|附近)/i.test(input);
 }
 
 function isGreeting(input: string): boolean {
@@ -1221,6 +1269,126 @@ async function answerHolidayGreeting(context: TransitAssistantContext): Promise<
   }
 }
 
+function getGuideProfile(input: string, context: TransitAssistantContext, useContext: boolean) {
+  const text = input.toLowerCase();
+  const area =
+    /waterfront|island|harbou?r|湖边|岛/.test(text) ? "waterfront" :
+    /kensington|chinatown|queen\s+west|spadina|west|西/.test(text) ? "west downtown" :
+    /rom|yorkville|midtown|bloor|中城/.test(text) ? "midtown" :
+    /downtown|city\s+centre|center|市中心/.test(text) ? "downtown" :
+    useContext ? context.guideArea : undefined;
+  const duration =
+    /half\s*day|half-day|半日|半天/.test(text) ? "half-day" :
+    /one\s*day|full\s*day|day\s+trip|一天|一日游/.test(text) ? "one-day" :
+    /evening|night|晚上|夜/.test(text) ? "evening" :
+    /morning|上午/.test(text) ? "morning" :
+    /afternoon|下午/.test(text) ? "afternoon" :
+    useContext ? context.guideDuration ?? "half-day" : "half-day";
+  const audience =
+    /kids?|children|family|亲子|孩子|家庭/.test(text) ? "family" :
+    /date|couple|romantic|情侣|约会/.test(text) ? "date" :
+    /first\s*time|tourist|第一次|游客/.test(text) ? "first time" :
+    useContext ? context.guideAudience : undefined;
+  const budget =
+    /free|免费/.test(text) ? "free" :
+    /cheap|cheaper|budget|low\s+cost|便宜|省钱|预算/.test(text) ? "low" :
+    /upscale|fancy|高端/.test(text) ? "higher" :
+    useContext ? context.guideBudget : undefined;
+  const wantsFood = /food|restaurant|eat|lunch|dinner|cafe|coffee|吃|餐厅|美食|咖啡/.test(text);
+  const wantsAttractions = /attraction|tourist|sightseeing|view|景点|游客|看景点/.test(text);
+  const topic =
+    /rain|indoor|museum|gallery|下雨|室内|博物馆|美术馆/.test(text) ? "indoor" :
+    wantsFood ? "food" :
+    /park|nature|walk|outdoor|公园|自然|散步|室外/.test(text) ? "parks" :
+    /shop|mall|shopping|购物|商场/.test(text) ? "shopping" :
+    /night|bar|evening|晚上|夜/.test(text) ? "night" :
+    wantsAttractions ? "attractions" :
+    useContext ? context.guideTopic ?? "general" : "general";
+
+  return { area, duration, audience, budget, topic, wantsFood, wantsAttractions };
+}
+
+function scoreGuidePlace(place: GuidePlace, profile: ReturnType<typeof getGuideProfile>) {
+  let score = 0;
+  if (profile.area && (place.area === profile.area || place.area.includes(profile.area) || profile.area.includes(place.area))) score += 3;
+  if (profile.topic === place.category) score += 4;
+  if (profile.topic === "indoor" && place.indoor) score += 4;
+  if (profile.wantsFood && place.category === "food") score += 3;
+  if (profile.wantsAttractions && (place.category === "attractions" || place.category === "culture")) score += 3;
+  if (profile.topic === "general" && ["attractions", "food", "culture"].includes(place.category)) score += 1;
+  if (profile.audience && place.bestFor.includes(profile.audience)) score += 3;
+  if (profile.budget === "free" && place.budget === "free") score += 4;
+  if (profile.budget === "low" && (place.budget === "free" || place.budget === "low")) score += 3;
+  if (profile.budget === "higher" && place.budget === "higher") score += 2;
+  if (profile.duration === "evening" && (place.category === "food" || place.category === "night")) score += 2;
+  return score;
+}
+
+function buildGuideRoute(places: GuidePlace[], profile: ReturnType<typeof getGuideProfile>) {
+  const count = profile.duration === "one-day" ? 5 : profile.duration === "evening" ? 3 : 4;
+  const budgetMatchedPlaces = profile.budget === "free"
+    ? places.filter(place => place.budget === "free")
+    : profile.budget === "low"
+      ? places.filter(place => place.budget === "free" || place.budget === "low")
+      : places;
+  const rankedPlaces = budgetMatchedPlaces.length >= Math.min(2, count) ? budgetMatchedPlaces : places;
+  const selected = [...rankedPlaces]
+    .sort((a, b) => scoreGuidePlace(b, profile) - scoreGuidePlace(a, profile))
+    .slice(0, count);
+
+  if (selected.length >= 3) return selected;
+
+  const fallback = GUIDE_PLACES
+    .filter(place => !selected.some(existing => existing.name === place.name))
+    .sort((a, b) => scoreGuidePlace(b, profile) - scoreGuidePlace(a, profile))
+    .slice(0, count - selected.length);
+
+  return [...selected, ...fallback];
+}
+
+function answerGuideQuestion(input: string, context: TransitAssistantContext): TransitAssistantAnswer {
+  const shouldInheritGuideContext = context.lastIntent === "guide" &&
+    !/\b(?:guide|itinerary|recommend|recommendation|suggest|things?\s+to\s+do|places?\s+to\s+(?:go|visit|eat|see)|plan\s+my\s+day)\b|(?:攻略|行程|推荐|去哪|哪里玩|玩什么)/i.test(input);
+  const profile = getGuideProfile(input, context, shouldInheritGuideContext);
+  const candidates = GUIDE_PLACES.filter(place => {
+    if (profile.topic === "food") return place.category === "food";
+    if (profile.topic === "parks") return place.category === "parks";
+    if (profile.topic === "shopping") return place.category === "shopping";
+    if (profile.topic === "night") return place.category === "night" || place.category === "food";
+    if (profile.topic === "indoor") return place.indoor;
+    if (profile.topic === "attractions") return place.category === "attractions" || place.category === "culture";
+    return true;
+  });
+  const route = buildGuideRoute(candidates, profile);
+  const routeText = route
+    .map((place, index) => `${index + 1}. ${place.name} (${place.area}): ${place.note}`)
+    .join(" ");
+  const durationText =
+    profile.duration === "one-day" ? "one-day" :
+    profile.duration === "evening" ? "evening" :
+    profile.duration === "morning" ? "morning" :
+    profile.duration === "afternoon" ? "afternoon" :
+    "half-day";
+  const budgetText = profile.budget ? ` Budget fit: ${profile.budget}.` : "";
+  const nextDestination = route[0]?.destinationQuery;
+  const navigationHint = nextDestination ? ` You can ask "navigate to ${nextDestination}" when you choose a stop.` : "";
+
+  return {
+    matchedIntent: "guide",
+    confidence: 86,
+    context: {
+      ...context,
+      guideArea: profile.area,
+      guideDuration: profile.duration,
+      guideAudience: profile.audience,
+      guideBudget: profile.budget,
+      guideTopic: profile.topic,
+      lastIntent: "guide",
+    },
+    text: `Here is a ${durationText} Toronto guide idea: ${routeText}${budgetText} I would keep live hours, tickets, and reservations checked before going.${navigationHint}`,
+  };
+}
+
 async function answerDestinationQuestion(
   input: string,
   context: TransitAssistantContext,
@@ -1654,12 +1822,17 @@ async function buildTransitAssistantAnswer(
 
   const classifiedIntent = await classifyTransitAssistantIntent(q, context);
   const llmIntent = classifiedIntent?.intent;
+  const wantsGuide = isGuideQuestion(q) || llmIntent === "guide" || isGuideFollowUp(q, context);
   const explicitNavigationQuestion =
     isNavigationQuestion(q) ||
     (llmIntent === "navigation" && (extractDestinationQuery(q) !== undefined || (context.destinationId && isDestinationFollowUp(q))));
   if (explicitNavigationQuestion) {
     const destinationAnswer = await answerDestinationQuestion(q, context);
     if (destinationAnswer) return destinationAnswer;
+  }
+
+  if (wantsGuide) {
+    return answerGuideQuestion(q, context);
   }
 
   const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
