@@ -346,6 +346,7 @@ function extractDestinationQuery(input: string): string | undefined {
   const cleaned = input.trim().replace(/[?.!]+$/, "");
   const patterns = [
     /\b(?:i\s+(?:want|need|would\s+like)\s+to\s+(?:go|travel|get)\s+to|can\s+you\s+(?:take|get|route|navigate)\s+me\s+to|take\s+me\s+to|get\s+me\s+to|route\s+me\s+to|navigate\s+me\s+to|go\s+to|travel\s+to|head\s+to|visit)\s+(.+)$/i,
+    /\b(?:i\s+(?:want|need|would\s+like)\s+to\s+)?(?:plan|schedule|map)\s+(?:me\s+)?(?:a\s+)?(?:ttc\s+|transit\s+)?trip\b.{0,80}?\bto\s+(.+)$/i,
     /\b(?:how\s+(?:do|can|should)\s+i\s+(?:get|go|travel)\s+to|how\s+to\s+(?:get|go|travel)\s+to|directions?\s+to|navigate\s+to|route\s+to|trip\s+to|transit\s+to|plan\s+(?:me\s+)?(?:a\s+)?trip\s+to)\s+(.+)$/i,
     /\b(?:what(?:'s|\s+is)?\s+the\s+(?:best\s+)?(?:route|way|trip)\s+to|give\s+me\s+(?:a\s+)?(?:route|trip|directions?)\s+to)\s+(.+)$/i,
   ];
@@ -359,16 +360,22 @@ function extractDestinationQuery(input: string): string | undefined {
 }
 
 function cleanDestinationQuery(input: string): string {
-  return input
+  const cleaned = input
     .trim()
-    .replace(/\s+\bfor\s+(?:today|tomorrow|tonight|this evening|later|(?:\d+|one|two|three|four|five|six)\s+(?:minute|minutes|hour|hours)\s*(?:later|from now)?|(?:at|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?).*/i, "")
-    .replace(/\s+\b(?:today|tomorrow|tonight|this evening)\s*(?:at|around)?\s*\d{0,2}:?\d{0,2}\s*(?:am|pm)?$/i, "")
+    .replace(/\b(?:please|thanks|thank you)\b/gi, " ")
+    .replace(/\b(?:for|on)\s+(?:today|tomorrow|tonight|this evening|later)\b/gi, " ")
+    .replace(/\b(?:today|tomorrow|tonight|this evening|later)\b/gi, " ")
+    .replace(/\b(?:at|around|by|before|after)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/gi, " ")
+    .replace(/\b(?:in\s+)?(?:another\s+)?(?:\d+|one|two|three|four|five|six)\s+(?:more\s+)?(?:minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/gi, " ")
+    .replace(/\s+/g, " ")
     .trim();
+
+  return cleaned || input.trim();
 }
 
 function isNavigationQuestion(input: string): boolean {
   return extractDestinationQuery(input) !== undefined ||
-    /\b(?:navigate|navigation|directions?|route\s+me|take\s+me|get\s+me|go\s+to|get\s+to|travel\s+to|trip\s+to|plan\s+(?:me\s+)?(?:a\s+)?trip\s+to)\b/i.test(input);
+    /\b(?:navigate|navigation|directions?|route\s+me|take\s+me|get\s+me|go\s+to|get\s+to|travel\s+to|trip\s+to|plan|schedule|map)\b.*\b(?:trip|to|there|destination)\b/i.test(input);
 }
 
 function isBareDestinationCandidate(input: string): boolean {
@@ -496,7 +503,8 @@ async function answerStopContextQuestion(
 }
 
 function isDestinationFollowUp(input: string): boolean {
-  return /\b(?:how\s+about|what\s+about|that\s+trip|the\s+trip|same\s+destination|there|destination|arrival|arrive|walk|ride|stops|directions?|navigate|miss|missed|next\s+(?:one|bus|vehicle|streetcar)|another\s+(?:one|bus|vehicle|streetcar)|more\s+options?|other\s+options?|any\s+other|alternatives?|alternate\s+(?:routes?|ways?)|other\s+ways?|different\s+routes?|what\s+else|something\s+else|choices?)\b/i.test(input);
+  return /\b(?:how\s+about|what\s+about|that\s+trip|the\s+trip|same\s+destination|there|destination|arrival|arrive|walk|ride|stops|directions?|navigate|miss|missed|leave|leaving|depart|departure|when\s+should\s+i|how\s+long|next\s+(?:one|bus|vehicle|streetcar)|another\s+(?:one|bus|vehicle|streetcar)|more\s+options?|other\s+options?|any\s+other|alternatives?|alternate\s+(?:routes?|ways?)|other\s+ways?|different\s+routes?|what\s+else|something\s+else|choices?)\b/i.test(input) ||
+    isTimeFollowUp(input);
 }
 
 function hasDestinationContext(context: TransitAssistantContext): boolean {
@@ -636,21 +644,7 @@ function parseAssistantTargetTime(input: string, baseTime = new Date()): Date | 
     return new Date(baseTime.getTime() + milliseconds);
   }
 
-  if (/\btomorrow\b/.test(text)) {
-    const target = new Date(baseTime);
-    target.setDate(target.getDate() + 1);
-    target.setHours(9, 0, 0, 0);
-    return target;
-  }
-
-  if (/\btonight\b|\bthis evening\b/.test(text)) {
-    const target = new Date(baseTime);
-    target.setHours(20, 0, 0, 0);
-    if (target.getTime() <= baseTime.getTime()) target.setDate(target.getDate() + 1);
-    return target;
-  }
-
-  const explicitTime = text.match(/\b(?:at|around)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+  const explicitTime = text.match(/\b(?:at|around|by|before|after)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
   if (explicitTime) {
     let hour = Number(explicitTime[1]);
     const minute = Number(explicitTime[2] ?? 0);
@@ -661,7 +655,22 @@ function parseAssistantTargetTime(input: string, baseTime = new Date()): Date | 
     if (!suffix && hour >= 1 && hour <= 7) hour += 12;
 
     const target = new Date(baseTime);
+    if (/\btomorrow\b/.test(text)) target.setDate(target.getDate() + 1);
     target.setHours(hour, minute, 0, 0);
+    if (!/\btomorrow\b/.test(text) && target.getTime() <= baseTime.getTime()) target.setDate(target.getDate() + 1);
+    return target;
+  }
+
+  if (/\btomorrow\b/.test(text)) {
+    const target = new Date(baseTime);
+    target.setDate(target.getDate() + 1);
+    target.setHours(9, 0, 0, 0);
+    return target;
+  }
+
+  if (/\btonight\b|\bthis evening\b/.test(text)) {
+    const target = new Date(baseTime);
+    target.setHours(20, 0, 0, 0);
     if (target.getTime() <= baseTime.getTime()) target.setDate(target.getDate() + 1);
     return target;
   }
@@ -1020,9 +1029,15 @@ function describeNavigationLeg(leg: NavigationLeg): string {
 
 function buildNavigationTripText(route: NavigationRoute, timing: ReturnType<typeof calculateDestinationTiming>): string[] {
   if (route.available === false) {
+    const when = timing.targetTime ? ` around ${formatTransitTime(timing.targetTime)}` : " right now";
+    const addressText = route.destAddress ? ` at ${route.destAddress}` : "";
+    const message = route.message
+      ? `${timing.targetTime ? `For around ${formatTransitTime(timing.targetTime)}, ` : ""}${route.message}`
+      : `I found ${route.destName}${addressText}, but live transit routing is unavailable${when}.`;
+
     return [
-      route.message ?? `I could not find a route to ${route.destName} right now.`,
-      "Try another travel mode, a more specific address, or a nearby landmark.",
+      message,
+      "You can still use that destination in navigation, or try another travel mode, a more specific address, or a nearby landmark.",
     ];
   }
 
@@ -1637,14 +1652,16 @@ async function buildTransitAssistantAnswer(
     return answerCurrentTimeQuestion(context);
   }
 
-  const explicitNavigationQuestion = isNavigationQuestion(q);
+  const classifiedIntent = await classifyTransitAssistantIntent(q, context);
+  const llmIntent = classifiedIntent?.intent;
+  const explicitNavigationQuestion =
+    isNavigationQuestion(q) ||
+    (llmIntent === "navigation" && (extractDestinationQuery(q) !== undefined || (context.destinationId && isDestinationFollowUp(q))));
   if (explicitNavigationQuestion) {
     const destinationAnswer = await answerDestinationQuestion(q, context);
     if (destinationAnswer) return destinationAnswer;
   }
 
-  const classifiedIntent = await classifyTransitAssistantIntent(q, context);
-  const llmIntent = classifiedIntent?.intent;
   const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
   const wantsEvents = isEventQuestion(q) || llmIntent === "events" || (context.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
   const wantsHolidays = !explicitNavigationQuestion && (isHolidayQuestion(q) || llmIntent === "holidays" || (context.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp)));

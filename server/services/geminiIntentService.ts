@@ -190,7 +190,7 @@ export async function classifyTransitAssistantIntent(
     "- events: sports games, concerts, festivals, venues, large entertainment activity.",
     "- holidays: public holidays, statutory holidays, long weekends, holiday greetings.",
     "- crowding: passenger load, seats, packed vehicles.",
-    "- navigation: directions, trip planning, how to get to a destination.",
+    "- navigation: directions, trip planning, how to get to a destination, including messages like 'plan a trip tomorrow to CN Tower' or 'I want to go to Union at 8'.",
     "- help: transit-related but missing needed details or clarification.",
     "- out-of-scope: not about TTC transit, commuting, routing, stops, traffic, weather, events, holidays, or crowding.",
     "Use context for follow-ups like 'what about now' or 'why'.",

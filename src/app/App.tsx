@@ -2355,12 +2355,14 @@ export default function App() {
           zoom: canvasScale,
         }}
       >
-        <AccountControl
-          currentUser={currentUser}
-          onLogin={handleLogin}
-          onSignup={handleSignup}
-          onLogout={handleLogout}
-        />
+        {!searching && screen.id === "map" && !screen.fromSearch && (
+          <AccountControl
+            currentUser={currentUser}
+            onLogin={handleLogin}
+            onSignup={handleSignup}
+            onLogout={handleLogout}
+          />
+        )}
         {searching ? (
           <SearchOverlay
             query={query}
