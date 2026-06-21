@@ -771,7 +771,7 @@ function isHolidayQuestion(input: string): boolean {
 }
 
 function isGuideQuestion(input: string): boolean {
-  return /\b(?:guide|itinerary|recommend|recommendation|suggest|where\s+should\s+i\s+go|what\s+should\s+i\s+do|things?\s+to\s+do|places?\s+to\s+(?:go|visit|eat|see)|tourist|tourism|sightseeing|attractions?|restaurants?|food|eat|lunch|dinner|cafe|coffee|date|family|kids|rainy|rain\s+day|budget|cheap|free|half\s+day|one\s+day|day\s+trip|plan\s+my\s+day|plan\s+(?:a\s+)?day|travel\s+plan|trip\s+ideas?|where\s+to\s+eat|where\s+to\s+visit|visit\s+toronto)\b/i.test(input) ||
+  return /\b(?:guide|itinerary|recommend|recommendation|suggest|where\s+should\s+i\s+go|what\s+should\s+i\s+do|things?\s+to\s+do|places?\s+to\s+(?:go|visit|eat|see)|tourist|tourism|sightseeing|attractions?|restaurants?|food|eat|lunch|dinner|cafe|coffee|date|family|kids|rainy|rain\s+day|budget|cheap|free|half\s+day|one\s+day|day\s+trip|plan\s+my\s+day|plan\s+(?:a\s+)?day|plan\s+(?:a\s+)?(?:trip|travel|visit|tour)|plan\s+to\s+(?:travel|visit|tour)|travel\s+(?:in|around|through)\s+toronto|tour\s+(?:in|around)\s+toronto|travel\s+plan|trip\s+ideas?|where\s+to\s+eat|where\s+to\s+visit|visit\s+toronto)\b/i.test(input) ||
     /\b(?:itinéraire|recommande|recommandation|suggère|où\s+aller|quoi\s+faire|à\s+visiter|restaurants?|manger|déjeuner|dîner|café|touriste|attractions?|musée|famille|enfants|pluie|budget|gratuit|demi-journée|journée|visiter\s+toronto)\b/i.test(input) ||
     /(?:攻略|行程|推荐|去哪|哪里玩|玩什么|吃什么|餐厅|景点|一日游|半日|亲子|情侣|下雨|预算|便宜|免费|附近|旅游|旅行|安排|计划|玩一天|半天|咖啡|午餐|晚餐|博物馆|室内|室外|多伦多怎么玩)/i.test(input);
 }
@@ -1626,29 +1626,29 @@ function buildNavigationTripText(
   language: ResponseLanguage = "en",
 ): string[] {
   if (route.available === false) {
-    const when = timing.targetTime ? ` around ${formatTransitTime(timing.targetTime)}` : " right now";
-    const addressText = route.destAddress ? ` at ${route.destAddress}` : "";
-    const message = route.message
-      ? `${timing.targetTime ? `For around ${formatTransitTime(timing.targetTime)}, ` : ""}${route.message}`
-      : `I found ${route.destName}${addressText}, but live transit routing is unavailable${when}.`;
-
     if (language === "zh") {
       return [
-        `我找到了 ${route.destName}${route.destAddress ? `，地址是 ${route.destAddress}` : ""}，但现在无法计算完整实时 TTC 路线。`,
-        "你仍然可以在导航里使用这个目的地，或换一种出行方式、输入更具体地址、选择附近地标。",
-      ];
+        "我找到了这个目的地，但现在无法计算完整实时路线。",
+        `目的地：${route.destName}`,
+        route.destAddress ? `地址：${route.destAddress}` : "",
+        "下一步：可以换一种出行方式、输入更具体地址，或选择附近地标。",
+      ].filter(Boolean);
     }
     if (language === "fr") {
       return [
-        `J'ai trouvé ${route.destName}${route.destAddress ? ` à ${route.destAddress}` : ""}, mais je ne peux pas calculer un trajet TTC complet en temps réel maintenant.`,
-        "Vous pouvez quand même utiliser cette destination dans la navigation, essayer un autre mode, une adresse plus précise ou un repère proche.",
-      ];
+        "J'ai trouvé cette destination, mais je ne peux pas calculer un trajet complet en temps réel maintenant.",
+        `Destination : ${route.destName}`,
+        route.destAddress ? `Adresse : ${route.destAddress}` : "",
+        "Étape suivante : essayez un autre mode, une adresse plus précise ou un repère proche.",
+      ].filter(Boolean);
     }
 
     return [
-      message,
-      "You can still use that destination in navigation, or try another travel mode, a more specific address, or a nearby landmark.",
-    ];
+      "I found this destination, but live routing is unavailable right now.",
+      `Destination: ${route.destName}`,
+      route.destAddress ? `Address: ${route.destAddress}` : "",
+      "Next step: try another travel mode, a more specific address, or a nearby landmark.",
+    ].filter(Boolean);
   }
 
   if (route.legs?.length) {
@@ -2124,10 +2124,10 @@ function answerGuideQuestion(input: string, context: TransitAssistantContext): T
       ? `Idéal pour : ${getGuideDurationLabel(profile.duration, language)} / ${getGuideTopicLabel(profile.topic, language)}${profile.audience ? ` / ${profile.audience}` : ""}${profile.budget ? ` / budget ${profile.budget}` : ""}`
       : `Best fit: ${getGuideDurationLabel(profile.duration, language)} / ${getGuideTopicLabel(profile.topic, language)}${profile.audience ? ` / ${profile.audience}` : ""}${profile.budget ? ` / ${profile.budget} budget` : ""}`;
   const transitHint = language === "zh"
-    ? "交通建议：选择第一个地点后，可以直接问我导航；我会把它带到现有 navigation 页面。"
+    ? "交通建议：选择第一个地点后，可以直接问我导航。\n我会把它带到现有 navigation 页面。"
     : language === "fr"
-      ? "Transport : choisissez le premier lieu puis demandez la navigation; je l'enverrai vers la page de navigation existante."
-      : "Transit: choose the first stop, then ask me to navigate; I can send it into the existing navigation flow.";
+      ? "Transport : choisissez le premier lieu, puis demandez la navigation.\nJe l'enverrai vers la page de navigation existante."
+      : "Transit: choose the first stop, then ask me to navigate.\nI can send it into the existing navigation flow.";
   const beforeGoing = language === "zh"
     ? "出发前：请确认实时营业时间、门票和预约。"
     : language === "fr"
@@ -2215,7 +2215,7 @@ async function answerDestinationQuestion(
     matchedIntent: "navigation",
     confidence: route.available === false ? 58 : timing.timingNote ? 78 : 86,
     context: nextContext,
-    text: buildNavigationTripText(route, timing, detectResponseLanguage(input)).join(detectResponseLanguage(input) === "en" ? " " : "\n"),
+    text: buildNavigationTripText(route, timing, detectResponseLanguage(input)).join("\n"),
   };
 }
 
