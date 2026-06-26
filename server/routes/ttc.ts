@@ -224,6 +224,7 @@ router.get("/navigation", async (req, res, next) => {
         String(req.query.destination ?? ""),
         originCoordinates,
         parseNavigationMode(req.query.mode),
+        String(req.query.departureTime ?? "") || undefined,
       ),
     );
   } catch (error) {

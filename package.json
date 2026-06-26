@@ -6,8 +6,10 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "download:regional-transit": "tsx scripts/downloadRegionalTransitFeeds.ts",
     "import:gtfs": "tsx scripts/importGtfs.ts",
     "import:gtfs:window": "tsx scripts/importGtfsWindow.ts",
+    "routing:build:regional": "java -Xmx4G -jar ./data/otp/otp-shaded-2.8.1.jar --build --serve ./data/otp",
     "setup:data": "tsx scripts/setupData.ts",
     "server": "tsx server/index.ts"
   },

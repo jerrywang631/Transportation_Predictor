@@ -539,6 +539,54 @@ const encodeGeoDestinationId = (recommendation: DestinationRecommendation) => {
   return `geo:${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
 };
 
+const cleanSearchLabel = (value: string) =>
+  value.replace(/^(bus stop|destination):\s*/i, "").trim();
+
+const getSearchTokens = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .map(token => token.trim())
+    .filter(token => token.length > 1);
+
+const scoreSearchRow = (row: SearchRow, query: string) => {
+  const q = query.toLowerCase().trim();
+  const title = cleanSearchLabel(row.title).toLowerCase();
+  const haystack = `${title} ${row.subtitle.toLowerCase()} ${row.distance.toLowerCase()}`;
+  const tokens = getSearchTokens(q);
+  let score = row.type === "dest" ? 6 : 0;
+
+  if (title === q) score += 120;
+  if (title.startsWith(q)) score += 70;
+  if (haystack.includes(q)) score += 45;
+  tokens.forEach((token, index) => {
+    if (title.includes(token)) score += 24 - Math.min(index * 2, 10);
+    if (row.subtitle.toLowerCase().includes(token)) score += 12;
+  });
+  if (tokens.length > 0 && tokens.every(token => haystack.includes(token))) score += 30;
+
+  return score;
+};
+
+const rankSearchRows = (rows: SearchRow[], query: string) => {
+  const seen = new Set<string>();
+  return rows
+    .filter(row => {
+      const key = row.pos
+        ? `${row.type}:${row.pos[0].toFixed(5)},${row.pos[1].toFixed(5)}`
+        : `${row.type}:${cleanSearchLabel(row.title).toLowerCase()}:${row.subtitle.toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) =>
+      scoreSearchRow(b, query) - scoreSearchRow(a, query) ||
+      cleanSearchLabel(a.title).localeCompare(cleanSearchLabel(b.title)),
+    )
+    .slice(0, 16);
+};
+
 type StoredUser = {
   username: string;
   passwordHash: string;
@@ -658,10 +706,10 @@ function SearchOverlay({ query, target, currentLocation, searchHistory, onQueryC
 
     searchPromise.then(([stops, dests]) => {
       if (cancelled) return;
-      const rows: SearchRow[] = [
+      const rows = rankSearchRows([
         ...stops.map(s => ({ id: s.id, type: "stop" as const, title: s.name, subtitle: s.routes, distance: s.distance, pos: s.pos })),
         ...dests.map(d => ({ id: d.id, type: "dest" as const, title: d.name, subtitle: d.address, distance: d.distance, pos: d.pos })),
-      ];
+      ], query);
       setResults(rows);
       setLoading(false);
     }).catch(() => {
@@ -791,12 +839,19 @@ function SearchOverlay({ query, target, currentLocation, searchHistory, onQueryC
                 </div>
               </button>
             )}
+            {query.trim().length >= 2 && results.length > 0 && (
+              <div className="px-4 pt-3 pb-2">
+                <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#858585] tracking-[-0.08px]">
+                  {results.length} choices
+                </p>
+              </div>
+            )}
             {results.map(r => (
               <button
-                key={r.id}
+                key={`${r.type}-${r.id}`}
                 onClick={() => {
                   if (target === "origin" && r.pos) {
-                    const label = r.title.replace(/^(bus stop|destination):\s*/i, "");
+                    const label = cleanSearchLabel(r.title);
                     onRememberSearch({
                       ...r,
                       type: "origin",
@@ -814,7 +869,7 @@ function SearchOverlay({ query, target, currentLocation, searchHistory, onQueryC
                   {r.type === "stop" ? <BusIcon /> : <PinIcon />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{r.title}</p>
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{cleanSearchLabel(r.title)}</p>
                   <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">{r.subtitle}</p>
                 </div>
                 <div className="flex flex-col items-end shrink-0 gap-1">
@@ -1133,7 +1188,7 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
             ...report.factors,
             schedule: {
               value: report.etaMin,
-              description: `GTFS schedule shows the next vehicle in ${report.etaMin} min for ${dir}.`,
+              description: `The next vehicle is expected in ${report.etaMin} min for ${dir}.`,
             },
           },
         };
@@ -1265,7 +1320,7 @@ interface DestNavProps {
   originLabel: string;
   userPos: [number, number] | null;
   locationStatus: LocationStatus;
-  onStartNavigation: (mode: NavigationMode) => void;
+  onStartNavigation: (mode: NavigationMode, departureTime: string) => void;
   onBack: () => void;
   onSearchOrigin: () => void;
   onSearchDest: (initialQuery?: string) => void;
@@ -1275,7 +1330,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
   const [routesByMode, setRoutesByMode] = useState<Partial<Record<NavigationMode, NavigationRoute>>>({});
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<NavigationMode>("bus");
-  const currentClock = useCurrentClock();
+  const [departureTime, setDepartureTime] = useState(() => getTorontoTimeInputValue());
   const route = routesByMode[mode] ?? routesByMode.bus ?? null;
   const routeFailed = !loading && !route;
 
@@ -1285,7 +1340,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
     setLoading(true);
     Promise.allSettled(
       (["bus", "car", "walk", "bike"] as NavigationMode[]).map(async currentMode => {
-        const result = await getNavigationRoute("current-location", destId, originPos, currentMode);
+        const result = await getNavigationRoute("current-location", destId, originPos, currentMode, departureTime);
         return [currentMode, result] as const;
       })
     )
@@ -1299,7 +1354,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
       })
       .catch(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [destId, originPos]);
+  }, [departureTime, destId, originPos]);
 
   const modeTimes = (currentMode: NavigationMode) => {
     const routeForMode = routesByMode[currentMode];
@@ -1377,6 +1432,24 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
             : <span className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-[#727272] tracking-[-0.08px]">{route?.destName ?? "Destination unavailable"}</span>
           }
         </button>
+        <div className="flex items-center gap-2">
+          <label className="bg-[rgba(120,120,128,0.16)] rounded-full h-[38px] flex-1 flex items-center px-[11px] gap-2">
+            <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#727272] tracking-[-0.08px] shrink-0">Depart</span>
+            <input
+              type="time"
+              value={departureTime}
+              onChange={event => setDepartureTime(event.target.value || getTorontoTimeInputValue())}
+              className="min-w-0 flex-1 bg-transparent text-[16px] text-[#1a1a1a] tracking-[-0.08px] outline-none font-['SF_Compact',system-ui,sans-serif]"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => setDepartureTime(getTorontoTimeInputValue())}
+            className="h-[38px] px-4 rounded-full bg-[#007AFF] text-white font-['SF_Compact',system-ui,sans-serif] text-[14px] tracking-[-0.08px]"
+          >
+            Now
+          </button>
+        </div>
       </div>
 
       {/* Map */}
@@ -1429,7 +1502,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
                     <div className="size-[20px] shrink-0"><PinIcon fill="#007AFF" /></div>
                     <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{originLabel}</span>
                   </div>
-                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{currentClock}</span>
+                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{route.departureTime || departureTime}</span>
                 </div>
                 {route.available === false ? (
                   <div className="py-8 border-b border-[#b8b8b8]">
@@ -1472,7 +1545,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
               </>
             )}
             <button
-              onClick={() => onStartNavigation(mode)}
+              onClick={() => onStartNavigation(mode, departureTime)}
               disabled={route?.available === false}
               className="w-full bg-[#9d9d9d] disabled:bg-[#c9c9c9] rounded-[10px] h-[39px] flex items-center justify-center mt-2 cursor-pointer disabled:cursor-default"
             >
@@ -1489,6 +1562,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
 interface NavScreenProps {
   destId: string;
   mode: NavigationMode;
+  departureTime: string;
   mapCenter: [number, number];
   originPos: [number, number] | null;
   originLabel: string;
@@ -1496,9 +1570,8 @@ interface NavScreenProps {
   locationStatus: LocationStatus;
   onClose: () => void;
 }
-function NavScreen({ destId, mode, mapCenter, originPos, originLabel, userPos, locationStatus, onClose }: NavScreenProps) {
+function NavScreen({ destId, mode, departureTime, mapCenter, originPos, originLabel, userPos, locationStatus, onClose }: NavScreenProps) {
   const [route, setRoute] = useState<NavigationRoute | null>(null);
-  const currentClock = useCurrentClock();
   const routeLine = route?.legs?.flatMap(leg => leg.geometry ?? []);
   const destinationPos = route?.destinationCoordinates
     ? [route.destinationCoordinates.lat, route.destinationCoordinates.lng] as [number, number]
@@ -1541,8 +1614,8 @@ function NavScreen({ destId, mode, mapCenter, originPos, originLabel, userPos, l
 
   useEffect(() => {
     if (!originPos) return;
-    getNavigationRoute("current-location", destId, originPos, mode).then(setRoute).catch(() => null);
-  }, [destId, mode, originPos]);
+    getNavigationRoute("current-location", destId, originPos, mode, departureTime).then(setRoute).catch(() => null);
+  }, [departureTime, destId, mode, originPos]);
 
   return (
     <div className="bg-white relative h-full min-h-[844px]">
@@ -1568,7 +1641,7 @@ function NavScreen({ destId, mode, mapCenter, originPos, originLabel, userPos, l
                 <div className="size-[20px] shrink-0"><PinIcon fill="#007AFF" /></div>
                 <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{originLabel}</span>
               </div>
-              <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{currentClock}</span>
+              <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{route?.departureTime || departureTime}</span>
             </div>
             {!route ? (
               <div className="flex flex-col gap-2 py-2">
@@ -2174,7 +2247,7 @@ type AppScreen =
   | { id: "map"; stopId: string; fromSearch: boolean }
   | { id: "busReport"; stopId: string; route: number; dir: string; fromSearch: boolean }
   | { id: "destNav"; destId: string }
-  | { id: "navigation"; destId: string; mode: NavigationMode };
+  | { id: "navigation"; destId: string; mode: NavigationMode; departureTime: string };
 
 function useCanvasScale() {
   const [scale, setScale] = useState(1);
@@ -2205,6 +2278,10 @@ function formatTorontoClock(date: Date) {
     hour12: false,
     timeZone: "America/Toronto",
   });
+}
+
+function getTorontoTimeInputValue(date = new Date()) {
+  return formatTorontoClock(date);
 }
 
 function useCurrentClock() {
@@ -2439,9 +2516,9 @@ export default function App() {
     }
   };
 
-  const handleStartNavigation = (mode: NavigationMode) => {
+  const handleStartNavigation = (mode: NavigationMode, departureTime: string) => {
     if (screen.id === "destNav") {
-      setScreen({ id: "navigation", destId: screen.destId, mode });
+      setScreen({ id: "navigation", destId: screen.destId, mode, departureTime });
     }
   };
 
@@ -2597,6 +2674,7 @@ export default function App() {
           <NavScreen
             destId={screen.destId}
             mode={screen.mode}
+            departureTime={screen.departureTime}
             mapCenter={mapCenter}
             originPos={effectiveOriginPos}
             originLabel={effectiveOriginLabel}

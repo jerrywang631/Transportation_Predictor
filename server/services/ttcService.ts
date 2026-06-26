@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 
-type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "otp";
+type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "otp" | "google";
 type ServicePeriod = "day" | "night";
 
 export interface StopResult {
@@ -348,7 +348,7 @@ const getRealtimeTripUpdates = async () => {
   });
 
   if (!response.ok) {
-    throw new Error(`TTC GTFS-Realtime request failed with ${response.status}`);
+    throw new Error("Live arrival data is unavailable right now.");
   }
 
   const updates = parseRealtimeTripUpdates(await response.text());
@@ -551,6 +551,46 @@ const getDestinationRecord = (destination: string): DestinationRecord | null => 
     totalStops: 0,
     alsoAt: [],
   };
+};
+
+const getDestinationRecordFromSearchResult = (result: DestinationResult): DestinationRecord | null => {
+  const existing = getDestinationRecord(result.id);
+  if (existing) return existing;
+  if (!result.pos) return null;
+
+  const name = result.name.replace(/^destination:\s*/i, "").trim();
+  return {
+    name,
+    address: result.address,
+    lat: result.pos[0],
+    lng: result.pos[1],
+    distance: result.distance,
+    walkMin: 0,
+    walkMeters: 0,
+    busStop: name,
+    routeLabel: "Transit",
+    etaMin: 0,
+    departureTime: "",
+    arrivalTime: "",
+    totalStops: 0,
+    alsoAt: [],
+  };
+};
+
+const resolveDestinationRecord = async (destination: string): Promise<DestinationRecord | null> => {
+  const directDestination = getDestinationRecord(destination);
+  if (directDestination) return directDestination;
+
+  const query = destination.replace(/^destination:\s*/i, "").trim();
+  if (!query) return null;
+
+  const results = await searchDestinations(query);
+  const normalizedQuery = query.toLowerCase();
+  const bestMatch =
+    results.find((result) => result.name.replace(/^destination:\s*/i, "").toLowerCase() === normalizedQuery) ??
+    results[0];
+
+  return bestMatch ? getDestinationRecordFromSearchResult(bestMatch) : null;
 };
 
 const getGtfsStopRoutes = (db: Database.Database, stopId: string) => {
@@ -1096,6 +1136,28 @@ const getStopQueryTokens = (query: string): string[] =>
     .map((token) => token.trim())
     .filter((token) => token.length > 1 && !STOP_QUERY_FILLER_WORDS.has(token));
 
+const scoreStopCandidate = (stopName: string, routeNames: string, query: string, tokens: string[]) => {
+  const name = stopName.toLowerCase();
+  const routes = routeNames.toLowerCase();
+  let score = 0;
+
+  if (name === query) score += 120;
+  if (name.startsWith(query)) score += 70;
+  if (name.includes(query)) score += 45;
+  if (routes.split(",").some((route) => route.trim() === query)) score += 55;
+
+  tokens.forEach((token, index) => {
+    if (name.includes(token)) score += 24 - Math.min(index * 2, 10);
+    if (routes.includes(token)) score += 14;
+  });
+
+  if (tokens.length > 0 && tokens.every((token) => name.includes(token) || routes.includes(token))) {
+    score += 35;
+  }
+
+  return score;
+};
+
 export const searchStops = (query: string): StopResult[] => {
   const db = getGtfsDb();
   const q = query.toLowerCase().trim();
@@ -1165,7 +1227,7 @@ export const searchStops = (query: string): StopResult[] => {
     }
 
     const tokens = getStopQueryTokens(q);
-    if (!rows.length && tokens.length > 1) {
+    if (tokens.length > 0) {
       const tokenRows = db
         .prepare(`
           SELECT
@@ -1182,12 +1244,32 @@ export const searchStops = (query: string): StopResult[] => {
         `)
         .all(servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
 
-      rows = tokenRows
+      const supplementalRows = tokenRows
         .filter((stop) => {
           const name = stop.stop_name.toLowerCase();
-          return tokens.every((token) => name.includes(token));
+          const routes = (stop.route_names ?? "").toLowerCase();
+          return tokens.some((token) => name.includes(token) || routes.includes(token));
         })
-        .slice(0, 8);
+        .sort((a, b) =>
+          scoreStopCandidate(b.stop_name, b.route_names ?? "", q, tokens) -
+          scoreStopCandidate(a.stop_name, a.route_names ?? "", q, tokens) ||
+          a.stop_name.localeCompare(b.stop_name),
+        );
+
+      const seenStops = new Set<string>();
+      rows = [...rows, ...supplementalRows]
+        .filter((stop) => {
+          const key = stop.stop_name.toLowerCase();
+          if (seenStops.has(key)) return false;
+          seenStops.add(key);
+          return true;
+        })
+        .sort((a, b) =>
+          scoreStopCandidate(b.stop_name, b.route_names ?? "", q, tokens) -
+          scoreStopCandidate(a.stop_name, a.route_names ?? "", q, tokens) ||
+          a.stop_name.localeCompare(b.stop_name),
+        )
+        .slice(0, 12);
     }
 
     return rows.map((stop) => ({
@@ -1420,9 +1502,14 @@ export const searchDestinations = async (query: string): Promise<DestinationResu
     const seen = new Set<string>();
     return candidates.filter((result) => {
       if (!result.pos) return false;
-      const key = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
+      const labelKey = `${result.name.replace(/^destination:\s*/i, "").toLowerCase()}|${result.address.toLowerCase()}`;
+      const posKey = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
+      const key = `${labelKey}|${posKey}`;
+      const looseKey = labelKey;
       if (seen.has(key)) return false;
+      if (seen.has(looseKey)) return false;
       seen.add(key);
+      seen.add(looseKey);
       return true;
     }).slice(0, 10);
   }
@@ -1499,9 +1586,7 @@ export const getPrediction = async (
     const prediction = findGtfsPrediction(db, stopId, routeId, direction);
 
     if (!prediction) {
-      throw new Error(
-        `No GTFS prediction for stop=${stopId} route=${routeId} dir=${direction}`,
-      );
+      throw new Error("Arrival information is unavailable for this stop and route.");
     }
 
     const realtimePrediction = await findRealtimePrediction(
@@ -1592,8 +1677,8 @@ export const getBusReport = async (
         schedule: {
           value: prediction.offsets.schedule,
           description: isRealtime
-            ? `Route ${routeId} is using TTC GTFS-Realtime arrival data. ${describeScheduleOffset(routeId, prediction.offsets.schedule)}`
-            : `${routeId} is using the next scheduled GTFS departure for ${prediction.direction}.`,
+            ? `Route ${routeId} has a live arrival update. ${describeScheduleOffset(routeId, prediction.offsets.schedule)}`
+            : `Route ${routeId} is using the next scheduled departure for ${prediction.direction}.`,
         },
         weather: {
           value: 0,
@@ -1605,11 +1690,11 @@ export const getBusReport = async (
         },
         accidents: {
           value: 0,
-          description: `Live TTC arrival data is active; road incidents are checked separately for route ${routeId}.`,
+          description: `Live arrival data is active; road incidents are checked separately for route ${routeId}.`,
         },
         construction: {
           value: 0,
-          description: `Live TTC arrival data is active; construction impact is checked separately for route ${routeId}.`,
+          description: `Live arrival data is active; construction impact is checked separately for route ${routeId}.`,
         },
         other: {
           value: 0,
@@ -1742,15 +1827,42 @@ const getTorontoDateParts = (date = new Date()) => {
   ) as Record<"year" | "month" | "day" | "hour" | "minute" | "second", string>;
 };
 
-const formatOtpOffsetDateTime = (
-  dateParts: Record<"year" | "month" | "day" | "hour" | "minute" | "second", string>,
-) => {
-  return `${dateParts.year}-${dateParts.month}-${dateParts.day}T${dateParts.hour}:${dateParts.minute}:${dateParts.second}-04:00`;
+type TorontoDateParts = Record<"year" | "month" | "day" | "hour" | "minute" | "second", string>;
+
+const formatTorontoOffset = (date: Date) => {
+  const timeZoneName = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Toronto",
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+  }).formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? "GMT-4";
+  const match = timeZoneName.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+  if (!match) return "-04:00";
+
+  const [, sign, hour, minute = "00"] = match;
+  return `${sign}${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
 };
 
-const getOtpPlanDateTime = () => {
+const formatOtpOffsetDateTime = (
+  dateParts: TorontoDateParts,
+  offset: string,
+) => {
+  return `${dateParts.year}-${dateParts.month}-${dateParts.day}T${dateParts.hour}:${dateParts.minute}:${dateParts.second}${offset}`;
+};
+
+const getRequestedDepartureParts = (departureTime?: string): Pick<TorontoDateParts, "hour" | "minute" | "second"> | null => {
+  const match = departureTime?.trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+
+  return {
+    hour: match[1],
+    minute: match[2],
+    second: "00",
+  };
+};
+
+const getOtpPlanDateTime = (departureTime?: string) => {
   const configured = process.env.OTP_PLAN_DATETIME;
-  if (configured && configured !== "match-weekday") return configured;
+  if (!departureTime && configured && configured !== "match-weekday") return configured;
 
   const feedStart = process.env.OTP_GTFS_SERVICE_START_DATE ?? "2026-06-21";
   const [year, month, day] = feedStart.split("-").map(Number);
@@ -1758,17 +1870,24 @@ const getOtpPlanDateTime = () => {
 
   const now = new Date();
   const torontoNow = getTorontoDateParts(now);
-  const candidate = new Date(year, month - 1, day, Number(torontoNow.hour), Number(torontoNow.minute), Number(torontoNow.second));
+  const requestedParts = getRequestedDepartureParts(departureTime);
+  const planClockParts = requestedParts ?? {
+    hour: torontoNow.hour,
+    minute: torontoNow.minute,
+    second: torontoNow.second,
+  };
+  const candidate = new Date(year, month - 1, day, Number(planClockParts.hour), Number(planClockParts.minute), Number(planClockParts.second));
   const torontoToday = new Date(Number(torontoNow.year), Number(torontoNow.month) - 1, Number(torontoNow.day));
   const dayOffset = (torontoToday.getDay() - candidate.getDay() + 7) % 7;
   candidate.setDate(candidate.getDate() + dayOffset);
 
   return formatOtpOffsetDateTime({
     ...torontoNow,
+    ...planClockParts,
     year: String(candidate.getFullYear()).padStart(4, "0"),
     month: String(candidate.getMonth() + 1).padStart(2, "0"),
     day: String(candidate.getDate()).padStart(2, "0"),
-  });
+  }, formatTorontoOffset(candidate));
 };
 
 const getMinutesBetween = (from: unknown, to: unknown) => {
@@ -1838,10 +1957,272 @@ const modeLabel = (mode: NavigationMode) => {
   return "Transit";
 };
 
+type GoogleDirectionsStep = {
+  travel_mode?: string;
+  html_instructions?: string;
+  distance?: { value?: number; text?: string };
+  duration?: { value?: number; text?: string };
+  start_location?: { lat?: number; lng?: number };
+  end_location?: { lat?: number; lng?: number };
+  polyline?: { points?: string };
+  transit_details?: {
+    departure_stop?: { name?: string; location?: { lat?: number; lng?: number } };
+    arrival_stop?: { name?: string; location?: { lat?: number; lng?: number } };
+    departure_time?: { text?: string; value?: number };
+    arrival_time?: { text?: string; value?: number };
+    headsign?: string;
+    num_stops?: number;
+    line?: {
+      name?: string;
+      short_name?: string;
+      vehicle?: { type?: string; name?: string };
+      agencies?: Array<{ name?: string; url?: string }>;
+    };
+  };
+};
+
+type GoogleDirectionsLeg = {
+  start_address?: string;
+  end_address?: string;
+  start_location?: { lat?: number; lng?: number };
+  end_location?: { lat?: number; lng?: number };
+  departure_time?: { text?: string; value?: number };
+  arrival_time?: { text?: string; value?: number };
+  duration?: { value?: number; text?: string };
+  distance?: { value?: number; text?: string };
+  steps?: GoogleDirectionsStep[];
+};
+
+type GoogleDirectionsResponse = {
+  status?: string;
+  error_message?: string;
+  routes?: Array<{
+    overview_polyline?: { points?: string };
+    legs?: GoogleDirectionsLeg[];
+    warnings?: string[];
+  }>;
+};
+
+const getGoogleMapsApiKey = () =>
+  process.env.GOOGLE_MAPS_API_KEY ?? process.env.GOOGLE_DIRECTIONS_API_KEY;
+
+const getRoutingProvider = () => {
+  const provider = (process.env.ROUTING_PROVIDER ?? "otp").toLowerCase();
+  return provider === "google" || provider === "auto" ? provider : "otp";
+};
+
+const stripHtml = (value?: string) =>
+  (value ?? "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const getGoogleMode = (mode: NavigationMode) => {
+  if (mode === "car") return "driving";
+  if (mode === "walk") return "walking";
+  if (mode === "bike") return "bicycling";
+  return "transit";
+};
+
+const getGoogleDepartureEpochSeconds = (departureTime?: string) => {
+  const requested = getRequestedDepartureParts(departureTime);
+  if (!requested) return Math.floor(Date.now() / 1000);
+
+  const torontoNow = getTorontoDateParts();
+  const datePart = `${torontoNow.year}-${torontoNow.month}-${torontoNow.day}`;
+  const offset = formatTorontoOffset(new Date());
+  let timestamp = Date.parse(`${datePart}T${requested.hour}:${requested.minute}:${requested.second}${offset}`);
+
+  if (!Number.isFinite(timestamp)) return Math.floor(Date.now() / 1000);
+  if (timestamp <= Date.now() - 60_000) {
+    timestamp += 24 * 60 * 60 * 1000;
+  }
+
+  return Math.floor(timestamp / 1000);
+};
+
+const formatGoogleEpochTime = (epochSeconds?: number, fallback?: string) => {
+  if (!epochSeconds) return fallback ?? "";
+
+  return formatOtpTime(epochSeconds * 1000) || fallback || "";
+};
+
+const normalizeGoogleMode = (step: GoogleDirectionsStep): NavigationLeg["mode"] => {
+  const travelMode = (step.travel_mode ?? "").toUpperCase();
+  if (travelMode === "WALKING") return "WALK";
+  if (travelMode === "DRIVING") return "CAR";
+  if (travelMode === "BICYCLING") return "BICYCLE";
+
+  const vehicleType = step.transit_details?.line?.vehicle?.type?.toUpperCase();
+  if (vehicleType === "BUS") return "BUS";
+  if (vehicleType === "TRAM") return "STREETCAR";
+  if (vehicleType === "SUBWAY") return "SUBWAY";
+  if (travelMode === "TRANSIT") return "TRANSIT";
+  return "OTHER";
+};
+
+const stepPosition = (
+  primary?: { lat?: number; lng?: number },
+  fallback?: { lat?: number; lng?: number },
+): [number, number] | undefined => {
+  const lat = primary?.lat ?? fallback?.lat;
+  const lng = primary?.lng ?? fallback?.lng;
+  return lat !== undefined && lng !== undefined ? [lat, lng] : undefined;
+};
+
+const getGoogleNavigationUnavailableRoute = (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+  message?: string,
+): NavigationRoute => ({
+  source: "google",
+  available: false,
+  message: message ?? `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but routing did not return a complete ${modeLabel(mode).toLowerCase()} trip.`,
+  originCoordinates,
+  destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+  destName: dest.name,
+  destAddress: dest.address,
+  durationMin: undefined,
+  walkMin: 0,
+  walkMeters: 0,
+  busStop: "",
+  routeLabel: modeLabel(mode),
+  etaMin: 0,
+  departureTime: "",
+  arrivalTime: "",
+  totalStops: 0,
+  alsoAt: [],
+  legs: [],
+});
+
+const getGoogleNavigationRoute = async (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+  departureTime?: string,
+): Promise<NavigationRoute | null> => {
+  const key = getGoogleMapsApiKey();
+  if (!key) return null;
+
+  const googleMode = getGoogleMode(mode);
+  const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+  url.searchParams.set("origin", `${originCoordinates.lat},${originCoordinates.lng}`);
+  url.searchParams.set("destination", `${dest.lat},${dest.lng}`);
+  url.searchParams.set("mode", googleMode);
+  url.searchParams.set("alternatives", "true");
+  url.searchParams.set("region", "ca");
+  url.searchParams.set("language", "en");
+  url.searchParams.set("key", key);
+
+  if (googleMode === "transit" || googleMode === "driving") {
+    url.searchParams.set("departure_time", String(getGoogleDepartureEpochSeconds(departureTime)));
+  }
+
+  let data: GoogleDirectionsResponse;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+    if (!response.ok) {
+      return getGoogleNavigationUnavailableRoute(
+        dest,
+        originCoordinates,
+        mode,
+        "Routing is temporarily unavailable. Please try again later.",
+      );
+    }
+
+    data = await response.json() as GoogleDirectionsResponse;
+  } catch {
+    return getGoogleNavigationUnavailableRoute(
+      dest,
+      originCoordinates,
+      mode,
+      "Routing is temporarily unavailable. Please try again later.",
+    );
+  }
+
+  if (data.status !== "OK") {
+    return getGoogleNavigationUnavailableRoute(
+      dest,
+      originCoordinates,
+      mode,
+      data.status === "ZERO_RESULTS"
+        ? `No ${modeLabel(mode).toLowerCase()} trip was found for this origin and destination.`
+        : "Routing is temporarily unavailable. Please try again later.",
+    );
+  }
+
+  const route = data.routes?.[0];
+  const leg = route?.legs?.[0];
+  if (!route || !leg?.steps?.length) {
+    return getGoogleNavigationUnavailableRoute(dest, originCoordinates, mode);
+  }
+
+  const steps = leg.steps;
+  const legs: NavigationLeg[] = steps.map((step, index) => {
+    const transit = step.transit_details;
+    const routeLabel = transit
+      ? transit.line?.short_name ?? transit.line?.name ?? transit.line?.vehicle?.name
+      : undefined;
+
+    return {
+      mode: normalizeGoogleMode(step),
+      fromName: transit?.departure_stop?.name ?? (index === 0 ? leg.start_address : stripHtml(step.html_instructions)) ?? "Origin",
+      toName: transit?.arrival_stop?.name ?? (index === steps.length - 1 ? leg.end_address : stripHtml(step.html_instructions)) ?? "Destination",
+      fromPos: stepPosition(transit?.departure_stop?.location, step.start_location),
+      toPos: stepPosition(transit?.arrival_stop?.location, step.end_location),
+      durationMin: Math.max(1, Math.round((step.duration?.value ?? 0) / 60)),
+      distanceMeters: step.distance?.value === undefined ? undefined : Math.round(step.distance.value),
+      routeLabel,
+      headsign: transit?.headsign,
+      startTime: formatGoogleEpochTime(transit?.departure_time?.value, transit?.departure_time?.text),
+      endTime: formatGoogleEpochTime(transit?.arrival_time?.value, transit?.arrival_time?.text),
+      geometry: step.polyline?.points ? decodePolyline(step.polyline.points) : undefined,
+    };
+  });
+  const transitLeg = legs.find((candidate) =>
+    candidate.mode === "BUS" || candidate.mode === "STREETCAR" || candidate.mode === "SUBWAY" || candidate.mode === "TRANSIT"
+  );
+  const googleTransitStep = steps.find((step) => step.transit_details);
+  const transitEtaMin = googleTransitStep?.transit_details?.departure_time?.value && leg.departure_time?.value
+    ? Math.max(0, Math.round((googleTransitStep.transit_details.departure_time.value - leg.departure_time.value) / 60))
+    : undefined;
+  const durationMin = Math.max(1, Math.round((leg.duration?.value ?? 0) / 60));
+  const walkMin = legs
+    .filter((candidate) => candidate.mode === "WALK")
+    .reduce((sum, candidate) => sum + candidate.durationMin, 0);
+  const walkMeters = legs
+    .filter((candidate) => candidate.mode === "WALK")
+    .reduce((sum, candidate) => sum + (candidate.distanceMeters ?? 0), 0);
+
+  return {
+    source: "google",
+    available: true,
+    originCoordinates,
+    destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+    destName: dest.name,
+    destAddress: dest.address,
+    durationMin,
+    walkMin,
+    walkMeters,
+    busStop: transitLeg?.fromName ?? legs[0]?.toName ?? dest.name,
+    routeLabel: [transitLeg?.routeLabel, transitLeg?.headsign].filter(Boolean).join(" to ") || modeLabel(mode),
+    etaMin: transitEtaMin ?? durationMin,
+    departureTime: formatGoogleEpochTime(leg.departure_time?.value, leg.departure_time?.text) || departureTime || "",
+    arrivalTime: formatGoogleEpochTime(leg.arrival_time?.value, leg.arrival_time?.text),
+    totalStops: steps.reduce((sum, step) => sum + (step.transit_details?.num_stops ?? 0), 0),
+    alsoAt: [],
+    legs,
+  };
+};
+
 const getOtpNavigationRoute = async (
   dest: DestinationRecord,
   originCoordinates: { lat: number; lng: number },
   mode: NavigationMode,
+  departureTime?: string,
 ): Promise<NavigationRoute | null> => {
   const baseUrl = process.env.OTP_BASE_URL ?? "http://localhost:8080";
   const url = new URL("/otp/gtfs/v1", baseUrl.replace(/\/$/, ""));
@@ -1851,7 +2232,7 @@ const getOtpNavigationRoute = async (
     walk: "direct: [WALK]",
     bike: "direct: [BICYCLE]",
   };
-  const planDateTime = getOtpPlanDateTime();
+  const planDateTime = getOtpPlanDateTime(departureTime);
   const dateTimeVariable = planDateTime ? "$planDateTime: OffsetDateTime!, " : "";
   const dateTimeArgument = planDateTime ? "dateTime: { earliestDeparture: $planDateTime }" : "";
   const query = `
@@ -2021,20 +2402,72 @@ const getNavigationUnavailableRoute = (
   legs: [],
 });
 
-export const getNavigationRoute = (
+const getRealRoutingConfigurationRequiredRoute = (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+): NavigationRoute => ({
+  source: "google",
+  available: false,
+  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but cross-GTA ${modeLabel(mode).toLowerCase()} routing is not ready yet. Please try again after regional transit routing is enabled.`,
+  originCoordinates,
+  destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+  destName: dest.name,
+  destAddress: dest.address,
+  durationMin: undefined,
+  walkMin: 0,
+  walkMeters: 0,
+  busStop: "",
+  routeLabel: modeLabel(mode),
+  etaMin: 0,
+  departureTime: "",
+  arrivalTime: "",
+  totalStops: 0,
+  alsoAt: [],
+  legs: [],
+});
+
+export const getNavigationRoute = async (
   origin: string,
   destination: string,
   originCoordinates?: { lat: number; lng: number },
   mode: NavigationMode = "bus",
+  departureTime?: string,
 ): Promise<NavigationRoute> => {
-  const dest = getDestinationRecord(destination);
+  const dest = await resolveDestinationRecord(destination);
   if (!dest) throw new Error(`Unknown destination: ${destination}`);
 
   void origin;
 
   if (originCoordinates) {
-    return getOtpNavigationRoute(dest, originCoordinates, mode)
-      .then((route) => route ?? getUnavailableNavigationRoute(dest, originCoordinates, mode));
+    const hasGoogleKey = Boolean(getGoogleMapsApiKey());
+    const provider = getRoutingProvider();
+    if (provider === "google") {
+      return getGoogleNavigationRoute(dest, originCoordinates, mode, departureTime)
+        .then((route) => route ?? getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode));
+    }
+
+    if (provider === "otp") {
+      return getOtpNavigationRoute(dest, originCoordinates, mode, departureTime)
+        .then((route) => route ?? getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode));
+    }
+
+    return getGoogleNavigationRoute(dest, originCoordinates, mode, departureTime)
+      .then(async (googleRoute) => {
+        if (googleRoute?.available !== false) {
+          return googleRoute ?? await getOtpNavigationRoute(dest, originCoordinates, mode, departureTime);
+        }
+
+        const otpRoute = await getOtpNavigationRoute(dest, originCoordinates, mode, departureTime);
+        return otpRoute?.available === true ? otpRoute : googleRoute;
+      })
+      .then((route) => {
+        if (!hasGoogleKey && route?.available === false) {
+          return getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode);
+        }
+        if (route) return route;
+        return getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode);
+      });
   }
 
   return Promise.resolve(getMockNavigationRoute(dest, originCoordinates));
