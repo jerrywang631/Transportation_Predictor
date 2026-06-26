@@ -62,7 +62,7 @@ export async function apiRequest<T>(
       "message" in data &&
       typeof data.message === "string"
         ? data.message
-        : `API request failed with status ${response.status}`;
+        : "The request could not be completed right now.";
 
     throw new ApiError(message, response.status, data);
   }

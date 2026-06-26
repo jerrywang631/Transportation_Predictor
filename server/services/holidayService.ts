@@ -116,7 +116,7 @@ const requestNagerHolidays = async (year: number): Promise<Holiday[]> => {
   const data = await response.json() as NagerHoliday[];
 
   if (!response.ok) {
-    throw new Error(`Holiday API request failed with status ${response.status}`);
+    throw new Error("Holiday data is unavailable right now.");
   }
 
   return data

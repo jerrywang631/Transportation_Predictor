@@ -1567,7 +1567,7 @@ function describeLiveTrafficQuestionLocalized(
         : "目前没有明显额外交通延误。",
       `具体情况：\n${formatTrafficEvents(impact.events, language)}`,
       impact.source === "mock"
-        ? "实时交通 API 暂时不可用，因此使用本地时间和路线压力估算。"
+        ? "实时路况暂时不可用，因此使用本地时间和路线压力估算。"
         : "回答基于实时道路速度、拥堵和事件数据。下一个路口或几分钟内可能变化。",
     ].join("\n");
   }
@@ -1592,7 +1592,7 @@ function describeLiveTrafficQuestionLocalized(
       : "No major extra traffic delay is showing right now.",
     `Details:\n${formatTrafficEvents(impact.events, language)}`,
     impact.source === "mock"
-      ? "Live traffic data is unavailable, so this uses the local time-of-day and route-pressure estimate."
+      ? "Live traffic conditions are unavailable, so this uses the local time-of-day and route-pressure estimate."
       : "This uses live road speed, congestion, closure, and incident data. Conditions can change within minutes.",
   ].join("\n");
 }

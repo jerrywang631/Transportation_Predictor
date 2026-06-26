@@ -1248,7 +1248,7 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
             ...report.factors,
             schedule: {
               value: report.etaMin,
-              description: `GTFS schedule shows the next vehicle in ${report.etaMin} min for ${dir}.`,
+              description: `The next vehicle is expected in ${report.etaMin} min for ${dir}.`,
             },
           },
         };

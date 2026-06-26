@@ -348,7 +348,7 @@ const getRealtimeTripUpdates = async () => {
   });
 
   if (!response.ok) {
-    throw new Error(`TTC GTFS-Realtime request failed with ${response.status}`);
+    throw new Error("Live arrival data is unavailable right now.");
   }
 
   const updates = parseRealtimeTripUpdates(await response.text());
@@ -1546,9 +1546,7 @@ export const getPrediction = async (
     const prediction = findGtfsPrediction(db, stopId, routeId, direction);
 
     if (!prediction) {
-      throw new Error(
-        `No GTFS prediction for stop=${stopId} route=${routeId} dir=${direction}`,
-      );
+      throw new Error("Arrival information is unavailable for this stop and route.");
     }
 
     const realtimePrediction = await findRealtimePrediction(
@@ -1639,8 +1637,8 @@ export const getBusReport = async (
         schedule: {
           value: prediction.offsets.schedule,
           description: isRealtime
-            ? `Route ${routeId} is using TTC GTFS-Realtime arrival data. ${describeScheduleOffset(routeId, prediction.offsets.schedule)}`
-            : `${routeId} is using the next scheduled GTFS departure for ${prediction.direction}.`,
+            ? `Route ${routeId} has a live arrival update. ${describeScheduleOffset(routeId, prediction.offsets.schedule)}`
+            : `Route ${routeId} is using the next scheduled departure for ${prediction.direction}.`,
         },
         weather: {
           value: 0,
@@ -1652,11 +1650,11 @@ export const getBusReport = async (
         },
         accidents: {
           value: 0,
-          description: `Live TTC arrival data is active; road incidents are checked separately for route ${routeId}.`,
+          description: `Live arrival data is active; road incidents are checked separately for route ${routeId}.`,
         },
         construction: {
           value: 0,
-          description: `Live TTC arrival data is active; construction impact is checked separately for route ${routeId}.`,
+          description: `Live arrival data is active; construction impact is checked separately for route ${routeId}.`,
         },
         other: {
           value: 0,
@@ -2042,7 +2040,7 @@ const getGoogleNavigationUnavailableRoute = (
 ): NavigationRoute => ({
   source: "google",
   available: false,
-  message: message ?? `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but Google Maps routing did not return a complete ${modeLabel(mode).toLowerCase()} route.`,
+  message: message ?? `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but routing did not return a complete ${modeLabel(mode).toLowerCase()} trip.`,
   originCoordinates,
   destinationCoordinates: { lat: dest.lat, lng: dest.lng },
   destName: dest.name,
@@ -2091,7 +2089,7 @@ const getGoogleNavigationRoute = async (
         dest,
         originCoordinates,
         mode,
-        `Google Maps routing failed with status ${response.status}.`,
+        "Routing is temporarily unavailable. Please try again later.",
       );
     }
 
@@ -2101,7 +2099,7 @@ const getGoogleNavigationRoute = async (
       dest,
       originCoordinates,
       mode,
-      "Google Maps routing could not be reached right now.",
+      "Routing is temporarily unavailable. Please try again later.",
     );
   }
 
@@ -2110,7 +2108,9 @@ const getGoogleNavigationRoute = async (
       dest,
       originCoordinates,
       mode,
-      data.error_message || `Google Maps routing returned ${data.status ?? "no route"}.`,
+      data.status === "ZERO_RESULTS"
+        ? `No ${modeLabel(mode).toLowerCase()} trip was found for this origin and destination.`
+        : "Routing is temporarily unavailable. Please try again later.",
     );
   }
 
@@ -2369,7 +2369,7 @@ const getRealRoutingConfigurationRequiredRoute = (
 ): NavigationRoute => ({
   source: "google",
   available: false,
-  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but cross-GTA ${modeLabel(mode).toLowerCase()} routing needs a real provider. Set GOOGLE_MAPS_API_KEY with Google Maps Directions API enabled, or run OTP with complete GTHA GTFS feeds including GO Transit and local agencies.`,
+  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but cross-GTA ${modeLabel(mode).toLowerCase()} routing is not ready yet. Please try again after regional transit routing is enabled.`,
   originCoordinates,
   destinationCoordinates: { lat: dest.lat, lng: dest.lng },
   destName: dest.name,

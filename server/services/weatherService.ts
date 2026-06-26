@@ -107,7 +107,7 @@ const requestWeatherApi = async <T>(url: URL): Promise<T> => {
       "message" in data.error &&
       typeof data.error.message === "string"
         ? data.error.message
-        : `Weather API request failed with status ${response.status}`;
+        : "Weather data is unavailable right now.";
 
     throw new Error(message);
   }
