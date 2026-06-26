@@ -6,6 +6,7 @@ This project is a TTC transit prototype with:
 - Express API server
 - local TTC GTFS SQLite database for stops and scheduled arrivals
 - OpenTripPlanner 2.8 for real walking, driving, biking, and TTC routing
+- Google Maps Directions API support for real GTA/GTHA cross-agency routing when configured
 - live place search through a geocoder for arbitrary destinations
 
 ## Current Features
@@ -85,6 +86,7 @@ TTC_GTFS_RT_TRIP_UPDATES_URL=https://gtfsrt.ttc.ca/trips/update?format=text
 OTP_BASE_URL=http://localhost:8080
 OTP_PLAN_DATETIME=match-weekday
 OTP_GTFS_SERVICE_START_DATE=2026-06-21
+GOOGLE_MAPS_API_KEY=optional_google_maps_directions_api_key_for_gta_routing
 TICKETMASTER_API_KEY=optional_ticketmaster_discovery_api_key
 TOMTOM_API_KEY=optional_tomtom_traffic_api_key
 ```
@@ -94,6 +96,8 @@ TOMTOM_API_KEY=optional_tomtom_traffic_api_key
 `OTP_PLAN_DATETIME=match-weekday` maps the current clock time to the same weekday inside the GTFS feed calendar. This avoids failed transit searches when today's real date is outside the downloaded TTC feed's service dates.
 
 `TTC_GTFS_RT_TRIP_UPDATES_URL` enables real TTC GTFS-Realtime trip updates. Arrival predictions use this feed first when it contains a matching route and stop, then fall back to static GTFS schedules when live data is unavailable.
+
+`GOOGLE_MAPS_API_KEY` enables real cross-GTA/GTHA trip planning through Google Maps Directions API, including transit trips that combine GO Transit, TTC, Oakville Transit, MiWay, YRT/Viva, Brampton Transit, Durham Region Transit, HSR, walking, driving, and biking where Google has provider coverage. Enable Directions API for the key in Google Cloud and attach billing. Without this key, the app can only use your local OTP graph; for GTHA routing without Google, build OTP with complete GTFS feeds for the relevant agencies.
 
 `TICKETMASTER_API_KEY` enables live Toronto sports, concert, festival, and entertainment event lookups through the Ticketmaster Discovery API. If it is not set, the app falls back to local major-venue pressure estimates for Toronto.
 

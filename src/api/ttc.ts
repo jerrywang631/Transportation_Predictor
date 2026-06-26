@@ -10,7 +10,7 @@ import {
   type WeatherForecastHour,
 } from "./weather";
 
-export type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "ttc" | "otp";
+export type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "ttc" | "otp" | "google";
 
 export interface StopResult {
   source: TransitSource;

@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 
-type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "otp";
+type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "otp" | "google";
 type ServicePeriod = "day" | "night";
 
 export interface StopResult {
@@ -1919,6 +1919,260 @@ const modeLabel = (mode: NavigationMode) => {
   return "Transit";
 };
 
+type GoogleDirectionsStep = {
+  travel_mode?: string;
+  html_instructions?: string;
+  distance?: { value?: number; text?: string };
+  duration?: { value?: number; text?: string };
+  start_location?: { lat?: number; lng?: number };
+  end_location?: { lat?: number; lng?: number };
+  polyline?: { points?: string };
+  transit_details?: {
+    departure_stop?: { name?: string; location?: { lat?: number; lng?: number } };
+    arrival_stop?: { name?: string; location?: { lat?: number; lng?: number } };
+    departure_time?: { text?: string; value?: number };
+    arrival_time?: { text?: string; value?: number };
+    headsign?: string;
+    num_stops?: number;
+    line?: {
+      name?: string;
+      short_name?: string;
+      vehicle?: { type?: string; name?: string };
+      agencies?: Array<{ name?: string; url?: string }>;
+    };
+  };
+};
+
+type GoogleDirectionsLeg = {
+  start_address?: string;
+  end_address?: string;
+  start_location?: { lat?: number; lng?: number };
+  end_location?: { lat?: number; lng?: number };
+  departure_time?: { text?: string; value?: number };
+  arrival_time?: { text?: string; value?: number };
+  duration?: { value?: number; text?: string };
+  distance?: { value?: number; text?: string };
+  steps?: GoogleDirectionsStep[];
+};
+
+type GoogleDirectionsResponse = {
+  status?: string;
+  error_message?: string;
+  routes?: Array<{
+    overview_polyline?: { points?: string };
+    legs?: GoogleDirectionsLeg[];
+    warnings?: string[];
+  }>;
+};
+
+const getGoogleMapsApiKey = () =>
+  process.env.GOOGLE_MAPS_API_KEY ?? process.env.GOOGLE_DIRECTIONS_API_KEY;
+
+const stripHtml = (value?: string) =>
+  (value ?? "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const getGoogleMode = (mode: NavigationMode) => {
+  if (mode === "car") return "driving";
+  if (mode === "walk") return "walking";
+  if (mode === "bike") return "bicycling";
+  return "transit";
+};
+
+const getGoogleDepartureEpochSeconds = (departureTime?: string) => {
+  const requested = getRequestedDepartureParts(departureTime);
+  if (!requested) return Math.floor(Date.now() / 1000);
+
+  const torontoNow = getTorontoDateParts();
+  const datePart = `${torontoNow.year}-${torontoNow.month}-${torontoNow.day}`;
+  const offset = formatTorontoOffset(new Date());
+  let timestamp = Date.parse(`${datePart}T${requested.hour}:${requested.minute}:${requested.second}${offset}`);
+
+  if (!Number.isFinite(timestamp)) return Math.floor(Date.now() / 1000);
+  if (timestamp <= Date.now() - 60_000) {
+    timestamp += 24 * 60 * 60 * 1000;
+  }
+
+  return Math.floor(timestamp / 1000);
+};
+
+const formatGoogleEpochTime = (epochSeconds?: number, fallback?: string) => {
+  if (!epochSeconds) return fallback ?? "";
+
+  return formatOtpTime(epochSeconds * 1000) || fallback || "";
+};
+
+const normalizeGoogleMode = (step: GoogleDirectionsStep): NavigationLeg["mode"] => {
+  const travelMode = (step.travel_mode ?? "").toUpperCase();
+  if (travelMode === "WALKING") return "WALK";
+  if (travelMode === "DRIVING") return "CAR";
+  if (travelMode === "BICYCLING") return "BICYCLE";
+
+  const vehicleType = step.transit_details?.line?.vehicle?.type?.toUpperCase();
+  if (vehicleType === "BUS") return "BUS";
+  if (vehicleType === "TRAM") return "STREETCAR";
+  if (vehicleType === "SUBWAY") return "SUBWAY";
+  if (travelMode === "TRANSIT") return "TRANSIT";
+  return "OTHER";
+};
+
+const stepPosition = (
+  primary?: { lat?: number; lng?: number },
+  fallback?: { lat?: number; lng?: number },
+): [number, number] | undefined => {
+  const lat = primary?.lat ?? fallback?.lat;
+  const lng = primary?.lng ?? fallback?.lng;
+  return lat !== undefined && lng !== undefined ? [lat, lng] : undefined;
+};
+
+const getGoogleNavigationUnavailableRoute = (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+  message?: string,
+): NavigationRoute => ({
+  source: "google",
+  available: false,
+  message: message ?? `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but Google Maps routing did not return a complete ${modeLabel(mode).toLowerCase()} route.`,
+  originCoordinates,
+  destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+  destName: dest.name,
+  destAddress: dest.address,
+  durationMin: undefined,
+  walkMin: 0,
+  walkMeters: 0,
+  busStop: "",
+  routeLabel: modeLabel(mode),
+  etaMin: 0,
+  departureTime: "",
+  arrivalTime: "",
+  totalStops: 0,
+  alsoAt: [],
+  legs: [],
+});
+
+const getGoogleNavigationRoute = async (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+  departureTime?: string,
+): Promise<NavigationRoute | null> => {
+  const key = getGoogleMapsApiKey();
+  if (!key) return null;
+
+  const googleMode = getGoogleMode(mode);
+  const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
+  url.searchParams.set("origin", `${originCoordinates.lat},${originCoordinates.lng}`);
+  url.searchParams.set("destination", `${dest.lat},${dest.lng}`);
+  url.searchParams.set("mode", googleMode);
+  url.searchParams.set("alternatives", "true");
+  url.searchParams.set("region", "ca");
+  url.searchParams.set("language", "en");
+  url.searchParams.set("key", key);
+
+  if (googleMode === "transit" || googleMode === "driving") {
+    url.searchParams.set("departure_time", String(getGoogleDepartureEpochSeconds(departureTime)));
+  }
+
+  let data: GoogleDirectionsResponse;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+    if (!response.ok) {
+      return getGoogleNavigationUnavailableRoute(
+        dest,
+        originCoordinates,
+        mode,
+        `Google Maps routing failed with status ${response.status}.`,
+      );
+    }
+
+    data = await response.json() as GoogleDirectionsResponse;
+  } catch {
+    return getGoogleNavigationUnavailableRoute(
+      dest,
+      originCoordinates,
+      mode,
+      "Google Maps routing could not be reached right now.",
+    );
+  }
+
+  if (data.status !== "OK") {
+    return getGoogleNavigationUnavailableRoute(
+      dest,
+      originCoordinates,
+      mode,
+      data.error_message || `Google Maps routing returned ${data.status ?? "no route"}.`,
+    );
+  }
+
+  const route = data.routes?.[0];
+  const leg = route?.legs?.[0];
+  if (!route || !leg?.steps?.length) {
+    return getGoogleNavigationUnavailableRoute(dest, originCoordinates, mode);
+  }
+
+  const steps = leg.steps;
+  const legs: NavigationLeg[] = steps.map((step, index) => {
+    const transit = step.transit_details;
+    const routeLabel = transit
+      ? transit.line?.short_name ?? transit.line?.name ?? transit.line?.vehicle?.name
+      : undefined;
+
+    return {
+      mode: normalizeGoogleMode(step),
+      fromName: transit?.departure_stop?.name ?? (index === 0 ? leg.start_address : stripHtml(step.html_instructions)) ?? "Origin",
+      toName: transit?.arrival_stop?.name ?? (index === steps.length - 1 ? leg.end_address : stripHtml(step.html_instructions)) ?? "Destination",
+      fromPos: stepPosition(transit?.departure_stop?.location, step.start_location),
+      toPos: stepPosition(transit?.arrival_stop?.location, step.end_location),
+      durationMin: Math.max(1, Math.round((step.duration?.value ?? 0) / 60)),
+      distanceMeters: step.distance?.value === undefined ? undefined : Math.round(step.distance.value),
+      routeLabel,
+      headsign: transit?.headsign,
+      startTime: formatGoogleEpochTime(transit?.departure_time?.value, transit?.departure_time?.text),
+      endTime: formatGoogleEpochTime(transit?.arrival_time?.value, transit?.arrival_time?.text),
+      geometry: step.polyline?.points ? decodePolyline(step.polyline.points) : undefined,
+    };
+  });
+  const transitLeg = legs.find((candidate) =>
+    candidate.mode === "BUS" || candidate.mode === "STREETCAR" || candidate.mode === "SUBWAY" || candidate.mode === "TRANSIT"
+  );
+  const googleTransitStep = steps.find((step) => step.transit_details);
+  const transitEtaMin = googleTransitStep?.transit_details?.departure_time?.value && leg.departure_time?.value
+    ? Math.max(0, Math.round((googleTransitStep.transit_details.departure_time.value - leg.departure_time.value) / 60))
+    : undefined;
+  const durationMin = Math.max(1, Math.round((leg.duration?.value ?? 0) / 60));
+  const walkMin = legs
+    .filter((candidate) => candidate.mode === "WALK")
+    .reduce((sum, candidate) => sum + candidate.durationMin, 0);
+  const walkMeters = legs
+    .filter((candidate) => candidate.mode === "WALK")
+    .reduce((sum, candidate) => sum + (candidate.distanceMeters ?? 0), 0);
+
+  return {
+    source: "google",
+    available: true,
+    originCoordinates,
+    destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+    destName: dest.name,
+    destAddress: dest.address,
+    durationMin,
+    walkMin,
+    walkMeters,
+    busStop: transitLeg?.fromName ?? legs[0]?.toName ?? dest.name,
+    routeLabel: [transitLeg?.routeLabel, transitLeg?.headsign].filter(Boolean).join(" to ") || modeLabel(mode),
+    etaMin: transitEtaMin ?? durationMin,
+    departureTime: formatGoogleEpochTime(leg.departure_time?.value, leg.departure_time?.text) || departureTime || "",
+    arrivalTime: formatGoogleEpochTime(leg.arrival_time?.value, leg.arrival_time?.text),
+    totalStops: steps.reduce((sum, step) => sum + (step.transit_details?.num_stops ?? 0), 0),
+    alsoAt: [],
+    legs,
+  };
+};
+
 const getOtpNavigationRoute = async (
   dest: DestinationRecord,
   originCoordinates: { lat: number; lng: number },
@@ -2103,6 +2357,31 @@ const getNavigationUnavailableRoute = (
   legs: [],
 });
 
+const getRealRoutingConfigurationRequiredRoute = (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+): NavigationRoute => ({
+  source: "google",
+  available: false,
+  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but cross-GTA ${modeLabel(mode).toLowerCase()} routing needs a real provider. Set GOOGLE_MAPS_API_KEY with Google Maps Directions API enabled, or run OTP with complete GTHA GTFS feeds including GO Transit and local agencies.`,
+  originCoordinates,
+  destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+  destName: dest.name,
+  destAddress: dest.address,
+  durationMin: undefined,
+  walkMin: 0,
+  walkMeters: 0,
+  busStop: "",
+  routeLabel: modeLabel(mode),
+  etaMin: 0,
+  departureTime: "",
+  arrivalTime: "",
+  totalStops: 0,
+  alsoAt: [],
+  legs: [],
+});
+
 export const getNavigationRoute = (
   origin: string,
   destination: string,
@@ -2116,8 +2395,23 @@ export const getNavigationRoute = (
   void origin;
 
   if (originCoordinates) {
-    return getOtpNavigationRoute(dest, originCoordinates, mode, departureTime)
-      .then((route) => route ?? getUnavailableNavigationRoute(dest, originCoordinates, mode));
+    const hasGoogleKey = Boolean(getGoogleMapsApiKey());
+    return getGoogleNavigationRoute(dest, originCoordinates, mode, departureTime)
+      .then(async (googleRoute) => {
+        if (googleRoute?.available !== false) {
+          return googleRoute ?? await getOtpNavigationRoute(dest, originCoordinates, mode, departureTime);
+        }
+
+        const otpRoute = await getOtpNavigationRoute(dest, originCoordinates, mode, departureTime);
+        return otpRoute?.available === true ? otpRoute : googleRoute;
+      })
+      .then((route) => {
+        if (!hasGoogleKey && route?.available === false) {
+          return getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode);
+        }
+        if (route) return route;
+        return getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode);
+      });
   }
 
   return Promise.resolve(getMockNavigationRoute(dest, originCoordinates));
