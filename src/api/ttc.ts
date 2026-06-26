@@ -443,6 +443,7 @@ export function getNavigationRoute(
   destination: string,
   originPos?: [number, number] | null,
   mode: NavigationMode = "bus",
+  departureTime?: string,
 ): Promise<NavigationRoute> {
   return apiRequest<NavigationRoute>("/api/ttc/navigation", {
     params: {
@@ -451,6 +452,7 @@ export function getNavigationRoute(
       originLat: originPos?.[0],
       originLng: originPos?.[1],
       mode,
+      departureTime,
     },
   });
 }

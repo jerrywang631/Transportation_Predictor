@@ -1096,6 +1096,28 @@ const getStopQueryTokens = (query: string): string[] =>
     .map((token) => token.trim())
     .filter((token) => token.length > 1 && !STOP_QUERY_FILLER_WORDS.has(token));
 
+const scoreStopCandidate = (stopName: string, routeNames: string, query: string, tokens: string[]) => {
+  const name = stopName.toLowerCase();
+  const routes = routeNames.toLowerCase();
+  let score = 0;
+
+  if (name === query) score += 120;
+  if (name.startsWith(query)) score += 70;
+  if (name.includes(query)) score += 45;
+  if (routes.split(",").some((route) => route.trim() === query)) score += 55;
+
+  tokens.forEach((token, index) => {
+    if (name.includes(token)) score += 24 - Math.min(index * 2, 10);
+    if (routes.includes(token)) score += 14;
+  });
+
+  if (tokens.length > 0 && tokens.every((token) => name.includes(token) || routes.includes(token))) {
+    score += 35;
+  }
+
+  return score;
+};
+
 export const searchStops = (query: string): StopResult[] => {
   const db = getGtfsDb();
   const q = query.toLowerCase().trim();
@@ -1165,7 +1187,7 @@ export const searchStops = (query: string): StopResult[] => {
     }
 
     const tokens = getStopQueryTokens(q);
-    if (!rows.length && tokens.length > 1) {
+    if (tokens.length > 0) {
       const tokenRows = db
         .prepare(`
           SELECT
@@ -1182,12 +1204,32 @@ export const searchStops = (query: string): StopResult[] => {
         `)
         .all(servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
 
-      rows = tokenRows
+      const supplementalRows = tokenRows
         .filter((stop) => {
           const name = stop.stop_name.toLowerCase();
-          return tokens.every((token) => name.includes(token));
+          const routes = (stop.route_names ?? "").toLowerCase();
+          return tokens.some((token) => name.includes(token) || routes.includes(token));
         })
-        .slice(0, 8);
+        .sort((a, b) =>
+          scoreStopCandidate(b.stop_name, b.route_names ?? "", q, tokens) -
+          scoreStopCandidate(a.stop_name, a.route_names ?? "", q, tokens) ||
+          a.stop_name.localeCompare(b.stop_name),
+        );
+
+      const seenStops = new Set<string>();
+      rows = [...rows, ...supplementalRows]
+        .filter((stop) => {
+          const key = stop.stop_name.toLowerCase();
+          if (seenStops.has(key)) return false;
+          seenStops.add(key);
+          return true;
+        })
+        .sort((a, b) =>
+          scoreStopCandidate(b.stop_name, b.route_names ?? "", q, tokens) -
+          scoreStopCandidate(a.stop_name, a.route_names ?? "", q, tokens) ||
+          a.stop_name.localeCompare(b.stop_name),
+        )
+        .slice(0, 12);
     }
 
     return rows.map((stop) => ({
@@ -1420,9 +1462,14 @@ export const searchDestinations = async (query: string): Promise<DestinationResu
     const seen = new Set<string>();
     return candidates.filter((result) => {
       if (!result.pos) return false;
-      const key = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
+      const labelKey = `${result.name.replace(/^destination:\s*/i, "").toLowerCase()}|${result.address.toLowerCase()}`;
+      const posKey = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
+      const key = `${labelKey}|${posKey}`;
+      const looseKey = labelKey;
       if (seen.has(key)) return false;
+      if (seen.has(looseKey)) return false;
       seen.add(key);
+      seen.add(looseKey);
       return true;
     }).slice(0, 10);
   }
@@ -1742,15 +1789,42 @@ const getTorontoDateParts = (date = new Date()) => {
   ) as Record<"year" | "month" | "day" | "hour" | "minute" | "second", string>;
 };
 
-const formatOtpOffsetDateTime = (
-  dateParts: Record<"year" | "month" | "day" | "hour" | "minute" | "second", string>,
-) => {
-  return `${dateParts.year}-${dateParts.month}-${dateParts.day}T${dateParts.hour}:${dateParts.minute}:${dateParts.second}-04:00`;
+type TorontoDateParts = Record<"year" | "month" | "day" | "hour" | "minute" | "second", string>;
+
+const formatTorontoOffset = (date: Date) => {
+  const timeZoneName = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Toronto",
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+  }).formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? "GMT-4";
+  const match = timeZoneName.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+  if (!match) return "-04:00";
+
+  const [, sign, hour, minute = "00"] = match;
+  return `${sign}${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
 };
 
-const getOtpPlanDateTime = () => {
+const formatOtpOffsetDateTime = (
+  dateParts: TorontoDateParts,
+  offset: string,
+) => {
+  return `${dateParts.year}-${dateParts.month}-${dateParts.day}T${dateParts.hour}:${dateParts.minute}:${dateParts.second}${offset}`;
+};
+
+const getRequestedDepartureParts = (departureTime?: string): Pick<TorontoDateParts, "hour" | "minute" | "second"> | null => {
+  const match = departureTime?.trim().match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+
+  return {
+    hour: match[1],
+    minute: match[2],
+    second: "00",
+  };
+};
+
+const getOtpPlanDateTime = (departureTime?: string) => {
   const configured = process.env.OTP_PLAN_DATETIME;
-  if (configured && configured !== "match-weekday") return configured;
+  if (!departureTime && configured && configured !== "match-weekday") return configured;
 
   const feedStart = process.env.OTP_GTFS_SERVICE_START_DATE ?? "2026-06-21";
   const [year, month, day] = feedStart.split("-").map(Number);
@@ -1758,17 +1832,24 @@ const getOtpPlanDateTime = () => {
 
   const now = new Date();
   const torontoNow = getTorontoDateParts(now);
-  const candidate = new Date(year, month - 1, day, Number(torontoNow.hour), Number(torontoNow.minute), Number(torontoNow.second));
+  const requestedParts = getRequestedDepartureParts(departureTime);
+  const planClockParts = requestedParts ?? {
+    hour: torontoNow.hour,
+    minute: torontoNow.minute,
+    second: torontoNow.second,
+  };
+  const candidate = new Date(year, month - 1, day, Number(planClockParts.hour), Number(planClockParts.minute), Number(planClockParts.second));
   const torontoToday = new Date(Number(torontoNow.year), Number(torontoNow.month) - 1, Number(torontoNow.day));
   const dayOffset = (torontoToday.getDay() - candidate.getDay() + 7) % 7;
   candidate.setDate(candidate.getDate() + dayOffset);
 
   return formatOtpOffsetDateTime({
     ...torontoNow,
+    ...planClockParts,
     year: String(candidate.getFullYear()).padStart(4, "0"),
     month: String(candidate.getMonth() + 1).padStart(2, "0"),
     day: String(candidate.getDate()).padStart(2, "0"),
-  });
+  }, formatTorontoOffset(candidate));
 };
 
 const getMinutesBetween = (from: unknown, to: unknown) => {
@@ -1842,6 +1923,7 @@ const getOtpNavigationRoute = async (
   dest: DestinationRecord,
   originCoordinates: { lat: number; lng: number },
   mode: NavigationMode,
+  departureTime?: string,
 ): Promise<NavigationRoute | null> => {
   const baseUrl = process.env.OTP_BASE_URL ?? "http://localhost:8080";
   const url = new URL("/otp/gtfs/v1", baseUrl.replace(/\/$/, ""));
@@ -1851,7 +1933,7 @@ const getOtpNavigationRoute = async (
     walk: "direct: [WALK]",
     bike: "direct: [BICYCLE]",
   };
-  const planDateTime = getOtpPlanDateTime();
+  const planDateTime = getOtpPlanDateTime(departureTime);
   const dateTimeVariable = planDateTime ? "$planDateTime: OffsetDateTime!, " : "";
   const dateTimeArgument = planDateTime ? "dateTime: { earliestDeparture: $planDateTime }" : "";
   const query = `
@@ -2026,6 +2108,7 @@ export const getNavigationRoute = (
   destination: string,
   originCoordinates?: { lat: number; lng: number },
   mode: NavigationMode = "bus",
+  departureTime?: string,
 ): Promise<NavigationRoute> => {
   const dest = getDestinationRecord(destination);
   if (!dest) throw new Error(`Unknown destination: ${destination}`);
@@ -2033,7 +2116,7 @@ export const getNavigationRoute = (
   void origin;
 
   if (originCoordinates) {
-    return getOtpNavigationRoute(dest, originCoordinates, mode)
+    return getOtpNavigationRoute(dest, originCoordinates, mode, departureTime)
       .then((route) => route ?? getUnavailableNavigationRoute(dest, originCoordinates, mode));
   }
 
