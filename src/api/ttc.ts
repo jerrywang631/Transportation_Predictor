@@ -3,7 +3,7 @@ import { getTrafficImpact, type TrafficEvent, type TrafficImpact } from "./traff
 import { estimateUnifiedDelays } from "./delayModel";
 import { getEventImpact, type CityEvent, type EventImpact } from "./events";
 import { getHolidayImpact, type HolidayImpact } from "./holidays";
-import { queryLocalInfo, type LocalInfoResponse, type LocalInfoResult } from "./localInfo";
+import { queryLocalInfo, type LocalInfoResponse, type LocalInfoResult, type SourceConfidence } from "./localInfo";
 import { searchYelpRecommendations, type YelpRecommendation } from "./places";
 import {
   getRegionalPrediction,
@@ -15,6 +15,11 @@ import {
   type CurrentWeather,
   type WeatherForecastHour,
 } from "./weather";
+import {
+  priceRank,
+  rankCandidates,
+  type RecommendationKind,
+} from "../shared/recommendationRanking";
 
 export type TransitSource = "mock" | "gtfs" | "gtfs-rt" | "ttc" | "otp" | "google";
 
@@ -218,9 +223,15 @@ export interface AssistantRecommendationOption {
   rating?: number;
   reviews?: number;
   distanceKm?: number;
+  travelTimeMin?: number;
+  openNow?: boolean;
+  sourceConfidence?: SourceConfidence;
+  sourceType?: "official" | "google_places" | "third_party" | "unknown";
   categories?: string[];
   budget?: "free" | "low" | "medium" | "higher";
   destinationQuery?: string;
+  recommendationScore?: number;
+  recommendationReasons?: string[];
 }
 
 export interface TransitAssistantIntentScope {
@@ -2758,6 +2769,7 @@ async function answerHolidayGreeting(input: string, context: TransitAssistantCon
       text,
     };
   } catch {
+    if (isGuideQuestion(query) || isRecommendationQuestion(query)) return null;
     return understanding?.needsApi
       ? localInfoUnavailableAnswer(query, context, understanding, displayInput)
       : null;
@@ -3020,7 +3032,17 @@ function localInfoToRecommendations(info: LocalInfoResponse): AssistantRecommend
     rating: result.rating,
     reviews: result.reviews,
     distanceKm: result.distanceKm,
+    travelTimeMin: result.driveTimeMin,
+    openNow: result.openNow,
+    sourceConfidence: result.sourceConfidence,
+    sourceType: result.priceInfo?.source === "official_website"
+      ? "official"
+      : result.priceInfo?.source === "third_party"
+        ? "third_party"
+        : "google_places",
     categories: [result.category],
+    recommendationScore: result.recommendationScore,
+    recommendationReasons: result.recommendationReasons,
   }));
 }
 
@@ -3159,11 +3181,23 @@ async function answerLocalInfoQuestion(
     });
 
     if (info.results.length === 0) {
+      if (isGuideQuestion(query) || isRecommendationQuestion(query)) return null;
       return understanding?.needsApi
         ? localInfoUnavailableAnswer(query, context, understanding, displayInput)
         : null;
     }
 
+    const rankedRecommendations = rankRecommendationOptions(
+      localInfoToRecommendations(info),
+      query,
+      info.intent === "ticket_info" ? "places" : info.intent === "distance_route" ? "plan" : "shopping",
+      language,
+    );
+    const recommendationOrder = new Map(rankedRecommendations.map((option, index) => [option.name, index]));
+    const rankedResults = [...info.results].sort((a, b) =>
+      (recommendationOrder.get(a.name) ?? 999) - (recommendationOrder.get(b.name) ?? 999),
+    );
+    const topPick = formatTopRecommendationLine(rankedRecommendations[0], language);
     const caveats = info.caveats.map(caveat => `- ${caveat}`).join("\n");
     const sourceLine = language === "zh"
       ? `数据层：${info.sourceSummary}`
@@ -3200,13 +3234,14 @@ async function answerLocalInfoQuestion(
         lastUnderstanding: understanding ?? context.lastUnderstanding,
         lastRecommendationQuery: query,
         lastRecommendationKind: info.intent === "ticket_info" ? "places" : info.intent === "distance_route" ? "plan" : "shopping",
-        lastRecommendations: localInfoToRecommendations(info),
+        lastRecommendations: rankedRecommendations,
         lastIntent: info.intent === "distance_route" ? "navigation" : "recommendation",
       },
       text: [
         localInfoTitle(info, language),
+        topPick,
         "",
-        info.results.slice(0, 6).map((result, index) => formatLocalInfoResult(result, index, language)).join("\n\n"),
+        rankedResults.slice(0, 6).map((result, index) => formatLocalInfoResult(result, index, language)).join("\n\n"),
         "",
         sourceLine,
         "",
@@ -3221,19 +3256,37 @@ async function answerLocalInfoQuestion(
   }
 }
 
-function priceRank(option: AssistantRecommendationOption): number {
-  if (option.budget === "free") return 0;
-  if (option.budget === "low") return 1;
-  if (option.budget === "medium") return 2;
-  if (option.budget === "higher") return 3;
-  const dollars = option.price?.match(/\$/g)?.length;
-  return dollars && dollars > 0 ? dollars : 9;
+function rankRecommendationOptions(
+  options: AssistantRecommendationOption[],
+  input: string,
+  kind: TransitAssistantContext["lastRecommendationKind"],
+  language: ResponseLanguage,
+): AssistantRecommendationOption[] {
+  return rankCandidates(options, {
+    input,
+    kind: kind as RecommendationKind | undefined,
+    language,
+  });
+}
+
+function formatTopRecommendationLine(
+  option: AssistantRecommendationOption | undefined,
+  language: ResponseLanguage,
+): string {
+  if (!option) return "";
+  const reasons = option.recommendationReasons?.length
+    ? option.recommendationReasons.join(language === "zh" ? "、" : language === "fr" ? ", " : ", ")
+    : option.note;
+  if (!reasons) return "";
+  if (language === "zh") return `我最推荐 ${option.name}，因为${reasons}。`;
+  if (language === "fr") return `Je recommande surtout ${option.name}, car ${reasons}.`;
+  return `Top pick: ${option.name}, because ${reasons}.`;
 }
 
 function recommendationFollowUpMode(input: string): "cheapest" | "nearest" | "rating" | "plan" | "more" | "default" {
   if (/\b(?:cheapest|cheap|affordable|lowest\s+price|free)\b/i.test(input) || /(?:最便宜|便宜|实惠|免费|低价)/.test(input)) return "cheapest";
   if (/\b(?:closest|nearest|nearer|nearby|walking\s+distance)\b/i.test(input) || /(?:最近|近一点|附近|步行)/.test(input)) return "nearest";
-  if (/\b(?:highest\s+rated|best\s+rated|rating|reviews?|best)\b/i.test(input) || /(?:评分|评价|最高分|最好)/.test(input)) return "rating";
+  if (/\b(?:highest\s+rated|best\s+rated|rating|reviews?)\b/i.test(input) || /(?:评分|评价|最高分)/.test(input)) return "rating";
   if (/\b(?:plan|itinerary|route|schedule|day|afternoon|evening)\b/i.test(input) || /(?:计划|行程|路线|安排|一天|下午|晚上)/.test(input)) return "plan";
   if (/\b(?:another|different|more|other|else)\b/i.test(input) || /(?:换一个|更多|其他|别的|还有)/.test(input)) return "more";
   return "default";
@@ -3253,6 +3306,20 @@ function formatRecommendationOption(
           ? `environ ${option.distanceKm.toFixed(1)} km`
           : `${option.distanceKm.toFixed(1)} km away`
       : "",
+    option.travelTimeMin !== undefined
+      ? language === "zh"
+        ? `约 ${Math.round(option.travelTimeMin)} 分钟`
+        : language === "fr"
+          ? `environ ${Math.round(option.travelTimeMin)} min`
+          : `about ${Math.round(option.travelTimeMin)} min`
+      : "",
+    option.openNow !== undefined
+      ? language === "zh"
+        ? option.openNow ? "现在营业" : "当前未营业"
+        : language === "fr"
+          ? option.openNow ? "ouvert maintenant" : "fermé maintenant"
+          : option.openNow ? "open now" : "closed now"
+      : "",
     option.price || option.budget,
     option.rating !== undefined
       ? language === "zh"
@@ -3262,7 +3329,10 @@ function formatRecommendationOption(
           : `${option.rating.toFixed(1)} stars${option.reviews ? `, ${option.reviews} reviews` : ""}`
       : "",
   ].filter(Boolean).join(" - ");
-  const note = option.note ? `\n   ${language === "zh" ? "理由" : language === "fr" ? "Pourquoi" : "Why"}: ${option.note}` : "";
+  const reasons = option.recommendationReasons?.length
+    ? option.recommendationReasons.join(language === "zh" ? "、" : language === "fr" ? ", " : ", ")
+    : option.note;
+  const note = reasons ? `\n   ${language === "zh" ? "推荐理由" : language === "fr" ? "Pourquoi" : "Why"}: ${reasons}` : "";
   const link = option.url ? `\n   ${option.url}` : "";
   return `${index + 1}. ${option.name}${meta ? `\n   ${meta}` : ""}${note}${link}`;
 }
@@ -3335,13 +3405,18 @@ function answerRecommendationFollowUp(
 
   const language = detectResponseLanguage(input);
   const mode = recommendationFollowUpMode(input);
-  const sorted = [...previous].sort((a, b) => {
+  const smartRanked = rankRecommendationOptions(previous, input, context.lastRecommendationKind, language);
+  const sorted = [...smartRanked].sort((a, b) => {
     if (mode === "cheapest") return priceRank(a) - priceRank(b);
     if (mode === "nearest") return (a.distanceKm ?? 999) - (b.distanceKm ?? 999);
     if (mode === "rating") return (b.rating ?? 0) - (a.rating ?? 0) || (b.reviews ?? 0) - (a.reviews ?? 0);
     return 0;
   });
-  const visible = mode === "more" ? sorted.slice(1, 6) : sorted.slice(0, 5);
+  const visible = mode === "more"
+    ? smartRanked.slice(1, 6)
+    : mode === "default" || mode === "plan"
+      ? smartRanked.slice(0, 5)
+      : sorted.slice(0, 5);
 
   if (mode === "plan") {
     const lines = visible.slice(0, 4).map((option, index) => {
@@ -3377,6 +3452,8 @@ function answerRecommendationFollowUp(
         ? "按最近排序："
         : mode === "rating"
           ? "按评分排序："
+          : mode === "default"
+            ? "按综合推荐分排序："
           : "可以，换一组/继续看："
     : language === "fr"
       ? mode === "cheapest"
@@ -3385,6 +3462,8 @@ function answerRecommendationFollowUp(
           ? "Trié par distance :"
           : mode === "rating"
             ? "Trié par note :"
+            : mode === "default"
+              ? "Trié par meilleure recommandation globale :"
             : "Voici d'autres options :"
       : mode === "cheapest"
         ? "Sorted by cheapest / most budget-friendly:"
@@ -3392,7 +3471,11 @@ function answerRecommendationFollowUp(
           ? "Sorted by nearest:"
           : mode === "rating"
             ? "Sorted by highest rated:"
+            : mode === "default"
+              ? "Sorted by best overall fit:"
             : "Here are more options:";
+
+  const topPick = formatTopRecommendationLine(visible[0], language);
 
   const caveat = language === "zh"
     ? "价格和库存可能变化，出发前最好再确认。"
@@ -3404,7 +3487,7 @@ function answerRecommendationFollowUp(
     matchedIntent: "recommendation",
     confidence: 88,
     context: { ...context, lastRecommendations: visible, lastIntent: "recommendation" },
-    text: `${title}\n\n${formatRecommendationOptions(visible, language)}\n\n${caveat}`,
+    text: [title, topPick, "", formatRecommendationOptions(visible, language), "", caveat].filter(line => line !== "").join("\n"),
   };
 }
 
@@ -3605,7 +3688,12 @@ async function answerGuideQuestion(
       : [];
 
     if (yelpItems.length > 0) {
-      const options = yelpItems.map(yelpToRecommendationOption);
+      const options = rankRecommendationOptions(
+        yelpItems.map(yelpToRecommendationOption),
+        input,
+        recommendationKind,
+        language,
+      );
       const title = shoppingNeed
         ? language === "zh"
           ? `我找到几个可以买 ${shoppingNeed} 的选择：`
@@ -3627,11 +3715,14 @@ async function answerGuideQuestion(
         : language === "fr"
           ? "Vous pouvez ensuite demander : le moins cher, le plus proche, le mieux noté, ou fais-moi un plan."
           : "You can follow up with: cheapest, closest, highest rated, or make this a plan.";
+      const topPick = formatTopRecommendationLine(options[0], language);
       return {
         matchedIntent: "recommendation",
         confidence: 90,
         context: buildRecommendationContext(context, profile, recommendationQuery, recommendationKind, options),
-        text: `${title}${locationText}\n\n${formatRecommendationOptions(options, language)}\n\n${beforeGoing}\n\n${nextStep}`,
+        text: [title + locationText, topPick, "", formatRecommendationOptions(options, language), "", beforeGoing, "", nextStep]
+          .filter(line => line !== "")
+          .join("\n"),
       };
     }
 
@@ -3643,7 +3734,12 @@ async function answerGuideQuestion(
       profile.topic === "shopping" ? "shopping recommendations" :
       profile.topic === "attractions" ? "attraction recommendations" :
       "Toronto recommendations";
-    const options = rows.map(({ place, distanceKm }) => guideToRecommendationOption(place, distanceKm, language));
+    const options = rankRecommendationOptions(
+      rows.map(({ place, distanceKm }) => guideToRecommendationOption(place, distanceKm, language)),
+      input,
+      recommendationKind,
+      language,
+    );
     const fallbackBeforeGoing = language === "zh"
       ? "出发前：我目前没有实时评分，所以建议确认营业时间、库存、价格和近期评价。"
       : language === "fr"
@@ -3659,15 +3755,27 @@ async function answerGuideQuestion(
       : language === "fr"
         ? `Voici des recommandations ${profile.topic === "shopping" ? "magasinage" : "Toronto"} :`
         : `Here are ${title}:`;
+    const topPick = formatTopRecommendationLine(options[0], language);
 
     return {
       matchedIntent: "recommendation",
       confidence: 88,
       context: buildRecommendationContext(context, profile, recommendationQuery, recommendationKind, options),
-      text: `${fallbackTitle}${locationText}\n\n${formatRecommendationOptions(options, language)}\n\n${fallbackBeforeGoing}\n\n${fallbackNextStep}`,
+      text: [fallbackTitle + locationText, topPick, "", formatRecommendationOptions(options, language), "", fallbackBeforeGoing, "", fallbackNextStep]
+        .filter(line => line !== "")
+        .join("\n"),
     };
   }
-  const route = buildGuideRoute(candidates, profile);
+  const baseRoute = buildGuideRoute(candidates, profile);
+  const routeRecommendations = rankRecommendationOptions(
+    baseRoute.map(place => guideToRecommendationOption(place, undefined, language)),
+    input,
+    "plan",
+    language,
+  );
+  const routeOrder = new Map(routeRecommendations.map((option, index) => [option.name, index]));
+  const route = [...baseRoute].sort((a, b) => (routeOrder.get(a.name) ?? 999) - (routeOrder.get(b.name) ?? 999));
+  const topPick = formatTopRecommendationLine(routeRecommendations[0], language);
   const routeText = route
     .map((place, index) => buildGuidePlaceLine(place, index, route.length, profile, language))
     .join("\n\n");
@@ -3721,10 +3829,12 @@ async function answerGuideQuestion(
       guideTopic: profile.topic,
       lastRecommendationQuery: `${profile.topic} ${profile.area ?? "Toronto"}`,
       lastRecommendationKind: "plan",
-      lastRecommendations: route.map(place => guideToRecommendationOption(place, undefined, language)),
+      lastRecommendations: routeRecommendations,
       lastIntent: "guide",
     },
-    text: `${intro}\n${fitLine}${locationText}\n\n${planLabel}\n${routeText}${budgetText}\n\n${transitHint}\n\n${beforeGoing}${navigationHint}`,
+    text: [intro, fitLine + locationText, topPick, "", planLabel, routeText + budgetText, "", transitHint, "", beforeGoing + navigationHint]
+      .filter(line => line !== "")
+      .join("\n"),
   };
 }
 
@@ -4378,7 +4488,7 @@ async function buildTransitAssistantAnswer(
 
   const localInfoAnswer = await answerLocalInfoQuestion(resolvedQ, scopedContext, understanding, q);
   if (localInfoAnswer) return localInfoAnswer;
-  if (understanding.needsApi && [
+  if (!wantsGuide && understanding.needsApi && [
     "ticket_price",
     "opening_hours",
     "distance",
